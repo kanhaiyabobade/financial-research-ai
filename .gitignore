@@ -1,0 +1,12 @@
+# Local Environment configuration
+.env
+
+# Database file
+finance.db
+
+# Python bytecode and caches
+__pycache__/
+*.pyc
+
+# OS metadata
+.DS_Store
