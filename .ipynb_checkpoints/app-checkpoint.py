@@ -1,21 +1,10 @@
 import streamlit as st
 import plotly.graph_objects as go
 from dotenv import load_dotenv
-import re
-
-# Import services
 from stock_service import get_stock_info, get_stock_history
 from news_service import get_stock_news, NewsAPIError
 from pdf_processor import extract_pdf_data
 from ipo_service import save_drhp_report, get_all_reports
-
-# Import the four AI functions from gemini_service
-from gemini_service import (
-    generate_summary,
-    generate_red_flags,
-    generate_ipo_score,
-    generate_recommendation
-)
 
 # Load environment variables from .env
 load_dotenv()
@@ -190,72 +179,20 @@ if page == "🚀 IPO Intelligence":
         file_bytes = uploaded_file.read()
         filename = uploaded_file.name
         
-        # Create a unique key for the session state to cache results
-        analysis_key = f"drhp_analysis_{filename}_{len(file_bytes)}"
-        
-        if analysis_key not in st.session_state:
-            # ONE Streamlit spinner for the entire processing and AI analysis
-            with st.spinner("Extracting text and generating Gemini AI insights..."):
-                result = extract_pdf_data(file_bytes, filename)
-                
-                if result["success"]:
-                    try:
-                        text_content = result["text"]
-                        
-                        # Generate the AI components
-                        summary_val = generate_summary(text_content)
-                        red_flags_val = generate_red_flags(text_content)
-                        
-                        # Handle score parsing (convert return to float)
-                        raw_score = generate_ipo_score(text_content)
-                        try:
-                            if isinstance(raw_score, (int, float)):
-                                ipo_score_val = float(raw_score)
-                            else:
-                                score_match = re.search(r"\d+(\.\d+)?", str(raw_score))
-                                ipo_score_val = float(score_match.group(0)) if score_match else 50.0
-                        except Exception:
-                            ipo_score_val = 50.0
-                            
-                        recommendation_val = generate_recommendation(text_content)
-                        
-                        # Cache the successful analysis state
-                        st.session_state[analysis_key] = {
-                            "success": True,
-                            "filename": filename,
-                            "page_count": result["page_count"],
-                            "char_count": result["char_count"],
-                            "summary": summary_val,
-                            "red_flags": red_flags_val,
-                            "ipo_score": ipo_score_val,
-                            "recommendation": recommendation_val
-                        }
-                    except Exception as e:
-                        st.session_state[analysis_key] = {
-                            "success": False,
-                            "error": f"Failed to generate AI analysis: {str(e)}"
-                        }
-                else:
-                    st.session_state[analysis_key] = {
-                        "success": False,
-                        "error": result["error"]
-                    }
-                    
-        analysis = st.session_state[analysis_key]
-        
-        if not analysis["success"]:
-            st.error(f"Error processing PDF: {analysis['error']}")
-        else:
-            st.success("PDF processed and AI Analysis generated successfully!")
+        with st.spinner("Extracting text and metadata from PDF using PyMuPDF..."):
+            result = extract_pdf_data(file_bytes, filename)
             
-            # File Info Stats Row
+        if result["success"]:
+            st.success("PDF processed successfully!")
+            
+            # Display stats in 3 columns
             col_stat1, col_stat2, col_stat3 = st.columns(3)
             with col_stat1:
                 st.markdown(
                     f"""
                     <div class="metric-card">
                         <div style="font-size: 0.9rem; color: #718096; font-weight: 600; text-transform: uppercase;">File Name</div>
-                        <div style="font-size: 1.25rem; font-weight: 700; color: #3f51b5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{analysis['filename']}</div>
+                        <div style="font-size: 1.25rem; font-weight: 700; color: #3f51b5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{result['filename']}</div>
                     </div>
                     """, 
                     unsafe_allow_html=True
@@ -265,7 +202,7 @@ if page == "🚀 IPO Intelligence":
                     f"""
                     <div class="metric-card">
                         <div style="font-size: 0.9rem; color: #718096; font-weight: 600; text-transform: uppercase;">Page Count</div>
-                        <div style="font-size: 1.5rem; font-weight: 700; color: #3f51b5;">{analysis['page_count']}</div>
+                        <div style="font-size: 1.5rem; font-weight: 700; color: #3f51b5;">{result['page_count']}</div>
                     </div>
                     """, 
                     unsafe_allow_html=True
@@ -275,7 +212,7 @@ if page == "🚀 IPO Intelligence":
                     f"""
                     <div class="metric-card">
                         <div style="font-size: 0.9rem; color: #718096; font-weight: 600; text-transform: uppercase;">Extracted Characters</div>
-                        <div style="font-size: 1.5rem; font-weight: 700; color: #3f51b5;">{analysis['char_count']:,}</div>
+                        <div style="font-size: 1.5rem; font-weight: 700; color: #3f51b5;">{result['char_count']:,}</div>
                     </div>
                     """, 
                     unsafe_allow_html=True
@@ -283,86 +220,20 @@ if page == "🚀 IPO Intelligence":
             
             st.markdown("<br>", unsafe_allow_html=True)
             
-            # Redesigned Sections in requested order
-            
-            # 1. AI Summary
-            st.markdown("### 📄 AI Summary")
-            with st.container(border=True):
-                st.markdown(analysis["summary"])
-                
-            st.markdown("---")
-            
-            # 2. Investment Risk Analysis
-            st.markdown("### ⚠️ Investment Risk Analysis")
-            with st.container(border=True):
-                st.markdown(analysis["red_flags"])
-                
-            st.markdown("---")
-            
-            # 3. IPO Investment Score
-            st.markdown("### 📊 IPO Investment Score")
-            score = analysis["ipo_score"]
-            if score >= 75:
-                score_color = "#2e7d32"  # Green
-                score_label = "Strong"
-            elif score >= 50:
-                score_color = "#ff9800"  # Yellow/Orange
-                score_label = "Moderate"
-            else:
-                score_color = "#c62828"  # Red
-                score_label = "Avoid"
-                
-            st.markdown(f"""
-            <div style="background-color: rgba(128, 128, 128, 0.05); padding: 2rem; border-radius: 16px; text-align: center; border: 1px solid rgba(128, 128, 128, 0.15); margin-bottom: 1.5rem; font-family: 'Inter', sans-serif;">
-                <div style="font-size: 0.95rem; text-transform: uppercase; letter-spacing: 2px; color: #718096; margin-bottom: 0.5rem; font-weight: 600;">Overall AI Investment Score</div>
-                <div style="font-size: 4.5rem; font-weight: 800; color: {score_color}; line-height: 1; margin-bottom: 0.5rem;">{score:.1f} <span style="font-size: 1.5rem; color: #718096;">/ 100</span></div>
-                <div style="display: inline-block; padding: 0.35rem 1.25rem; border-radius: 20px; font-size: 0.9rem; font-weight: 700; color: {score_color}; text-transform: uppercase; border: 2.5px solid {score_color}; background-color: rgba(128, 128, 128, 0.02);">
-                    {score_label} Rating
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            st.markdown("---")
-            
-            # 4. Final Recommendation
-            st.markdown("### 💡 Final Recommendation")
-            rec = analysis["recommendation"]
-            rec_upper = str(rec).upper()
-            
-            if "INVEST" in rec_upper:
-                rec_color = "#2e7d32"      # Green
-                rec_bg = "rgba(46, 125, 50, 0.08)"
-                rec_border = "#2e7d32"
-                rec_icon = "🟢"
-                rec_text = "INVEST"
-            elif "AVOID" in rec_upper:
-                rec_color = "#c62828"      # Red
-                rec_bg = "rgba(198, 40, 40, 0.08)"
-                rec_border = "#c62828"
-                rec_icon = "🔴"
-                rec_text = "AVOID"
-            else:
-                rec_color = "#ff9800"      # Yellow/Orange
-                rec_bg = "rgba(255, 152, 0, 0.08)"
-                rec_border = "#ff9800"
-                rec_icon = "🟡"
-                rec_text = "WATCH"
-                
-            st.markdown(f"""
-            <div style="background-color: {rec_bg}; padding: 1.75rem; border-radius: 12px; border: 1px solid {rec_border}; border-left: 8px solid {rec_border}; margin-top: 0.5rem; margin-bottom: 2rem; font-family: 'Inter', sans-serif;">
-                <h3 style="color: {rec_color}; margin: 0 0 0.75rem 0; font-family: 'Inter', sans-serif; display: flex; align-items: center; font-weight: 700;">
-                    <span style="margin-right: 0.5rem;">{rec_icon}</span> recommendation: {rec_text}
-                </h3>
-                <div style="font-size: 1rem; line-height: 1.6; color: inherit;">
-                    {rec}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            st.markdown("---")
+            # Preview section
+            st.subheader("Extracted Text Preview (First 1000 Characters)")
+            preview_text = result["text"][:1000]
+            st.text_area(
+                label="Extracted Text (First 1000 Characters):",
+                value=preview_text,
+                height=350,
+                disabled=True,
+                label_visibility="collapsed"
+            )
             
             # Database Save option
-            st.subheader("Save Analysis to Local Database")
+            st.markdown("---")
+            st.subheader("Save Document to Local Database")
             
             # Deduce a neat default company name from the filename
             default_company_name = filename.replace(".pdf", "").replace("_", " ").replace("-", " ").title()
@@ -376,83 +247,43 @@ if page == "🚀 IPO Intelligence":
                 )
             with save_col2:
                 st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-                save_btn = st.button("Save Analysis", type="primary", use_container_width=True)
+                save_btn = st.button("Save DRHP", type="primary", use_container_width=True)
                 
             if save_btn:
                 if not company_name.strip():
                     st.warning("Please enter a valid company name.")
                 else:
+                    # Save a summary snippet and placeholder red flags in the DB
+                    summary_snippet = result["text"][:4000] if len(result["text"]) > 4000 else result["text"]
                     save_success = save_drhp_report(
                         company_name=company_name.strip(),
-                        summary=analysis["summary"],
-                        red_flags=analysis["red_flags"],
-                        ipo_score=analysis["ipo_score"],
-                        recommendation=analysis["recommendation"]
+                        summary=summary_snippet,
+                        red_flags="Red flags pending detailed AI analysis."
                     )
                     if save_success:
-                        st.success(f"Successfully saved DRHP analysis for {company_name} to database!")
+                        st.success(f"Successfully saved DRHP report for {company_name} to database!")
                     else:
                         st.error("Failed to save the report to the local database.")
-                        
+        else:
+            st.error(f"Error processing PDF: {result['error']}")
+            
     # List previously saved reports from database
     st.markdown("---")
     st.subheader("Saved DRHP Reports in Database")
     saved_reports = get_all_reports()
     if not saved_reports:
-        st.info("No saved reports found in the database yet. Upload a DRHP PDF above and start analyzing.")
+        st.info("No saved reports found in the database yet. Upload a DRHP PDF above and click 'Save DRHP' to start tracking.")
     else:
         for report in saved_reports:
-            rec_saved = report.get("recommendation")
-            if rec_saved is None:
-                rec_saved = "N/A"
-                
-            score_saved = report.get("ipo_score")
-            
-            # Format score values safely
-            if score_saved is None:
-                score_str = "N/A"
-                score_val_str = "N/A"
-            else:
-                try:
-                    score_val = float(score_saved)
-                    score_str = f"{score_val:.0f}"
-                    score_val_str = f"{score_val:.1f}"
-                except (ValueError, TypeError):
-                    score_str = "N/A"
-                    score_val_str = "N/A"
-            
-            # Get color code / status icon
-            rec_saved_upper = str(rec_saved).upper()
-            if "INVEST" in rec_saved_upper:
-                badge_icon = "🟢"
-            elif "AVOID" in rec_saved_upper:
-                badge_icon = "🔴"
-            else:
-                badge_icon = "🟡"
-                
-            expander_title = f"📄 {report['company_name']} | {badge_icon} Score: {score_str}/100 — Saved on {report['created_at']}"
-            
-            with st.expander(expander_title):
-                st.markdown(f"### {report['company_name']}")
-                
-                # Show key metrics in 2 columns
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.metric(label="Investment Score", value=f"{score_val_str} / 100")
-                with c2:
-                    st.metric(label="Recommendation", value=str(rec_saved))
-                
-                st.markdown("#### 📄 AI Summary")
-                st.markdown(report.get("summary") or "No summary available.")
-                
-                st.markdown("#### ⚠️ Investment Risk Analysis")
-                st.markdown(report.get("red_flags") or "No risk analysis available.")
+            with st.expander(f"📄 {report['company_name']} — Saved on {report['created_at']}"):
+                st.markdown(f"**Company**: {report['company_name']}")
+                st.markdown(f"**Saved Text Preview**:")
+                st.code(report["summary"][:500] + "...", language="text")
+                st.markdown(f"**Notes/Red Flags**: {report['red_flags']}")
                 
     st.stop()  # Prevents executing the rest of app.py (the Stock Dashboard page)
 
-# ==============================================================================
-# Main Application (Stock Dashboard Page)
-# ==============================================================================
+# Main Application Title (Stock Dashboard)
 st.markdown("<h1 class='main-header'>📈 Financial Research AI</h1>", unsafe_allow_html=True)
 st.markdown("<p class='sub-header'>State-of-the-art equity analytics for Indian and global markets.</p>", unsafe_allow_html=True)
 
@@ -466,10 +297,11 @@ with col1:
         placeholder="e.g. RELIANCE.NS, TCS.NS, INFY.NS, AAPL",
         help="For Indian stocks listed on NSE, append '.NS' (e.g. RELIANCE.NS). For BSE, append '.BO'."
     ).strip()
-    
+
 with col2:
+    # Add vertical space to align the button
     st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-    analyze_button = st.button("Analyze Stock", type="primary", use_container_width=True)
+    analyze_button = st.button("Analyze Stock", type="primary", width="stretch")
 
 # State initialization or trigger of analyze action
 if analyze_button or ticker_input:
@@ -485,7 +317,7 @@ if analyze_button or ticker_input:
                 # 1. Header Metrics Card
                 st.markdown(f"### {stock_data['company_name']} ({stock_data['symbol']})")
                 
-                # 2. Key Metrics Row
+                # 2. Key Metrics Row (Kept unchanged)
                 m_col1, m_col2, m_col3 = st.columns(3)
                 
                 # Format variables
@@ -515,7 +347,7 @@ if analyze_button or ticker_input:
                 
                 st.markdown("---")
                 
-                # 2b. Key Stock Indicators
+                # 2b. Key Stock Indicators (Task)
                 st.markdown("##### Key Stock Indicators")
                 k_col1, k_col2, k_col3, k_col4, k_col5 = st.columns(5)
                 
@@ -551,7 +383,7 @@ if analyze_button or ticker_input:
                     )
                 )
                 
-                # Horizontal Timeframe Selector
+                # Horizontal Timeframe Selector (Task)
                 timeframe = st.radio(
                     "Select Timeframe:",
                     options=["1 Day", "5 Days", "1 Week", "1 Month", "6 Months", "1 Year", "5 Years", "All Time"],
@@ -661,7 +493,7 @@ if analyze_button or ticker_input:
                 
                 st.markdown("---")
                 
-                # 5. News Integration Section
+                # 5. News Integration Section (Task 2)
                 st.subheader("Latest News Coverage")
                 try:
                     news_articles = get_stock_news(stock_data["company_name"])

@@ -41,9 +41,22 @@ CREATE TABLE IF NOT EXISTS drhp_reports (
     company_name TEXT,
     summary TEXT,
     red_flags TEXT,
+    ipo_score REAL,
+    recommendation TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """)
 
+# Run migrations if columns are missing in an existing database
+cursor.execute("PRAGMA table_info(drhp_reports);")
+columns = [col[1] for col in cursor.fetchall()]
+if "ipo_score" not in columns:
+    cursor.execute("ALTER TABLE drhp_reports ADD COLUMN ipo_score REAL;")
+    print("Added ipo_score column to drhp_reports table.")
+if "recommendation" not in columns:
+    cursor.execute("ALTER TABLE drhp_reports ADD COLUMN recommendation TEXT;")
+    print("Added recommendation column to drhp_reports table.")
+
 conn.commit()
 conn.close()
+print("Database initialized successfully.")
