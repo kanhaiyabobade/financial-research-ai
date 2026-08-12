@@ -1,30 +1,36 @@
 import sqlite3
-from typing import Dict, Any, List
+import json
+from typing import Dict, Any, List, Optional
 
 DB_PATH = "finance.db"
 
 def run_migrations():
     """
     Ensures that the database table exists and has the required schema
-    including ipo_score and recommendation columns.
+    including structured data, risk_level, industry, and confidence columns.
     """
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
-        # Verify the table is configured with all columns
         cursor.execute("PRAGMA table_info(drhp_reports);")
         columns = [col[1] for col in cursor.fetchall()]
         
         if columns:
-            # Table exists, check for missing columns
             if "ipo_score" not in columns:
                 cursor.execute("ALTER TABLE drhp_reports ADD COLUMN ipo_score REAL;")
             if "recommendation" not in columns:
                 cursor.execute("ALTER TABLE drhp_reports ADD COLUMN recommendation TEXT;")
+            if "industry" not in columns:
+                cursor.execute("ALTER TABLE drhp_reports ADD COLUMN industry TEXT;")
+            if "risk_level" not in columns:
+                cursor.execute("ALTER TABLE drhp_reports ADD COLUMN risk_level TEXT;")
+            if "confidence" not in columns:
+                cursor.execute("ALTER TABLE drhp_reports ADD COLUMN confidence REAL;")
+            if "structured_data" not in columns:
+                cursor.execute("ALTER TABLE drhp_reports ADD COLUMN structured_data TEXT;")
             conn.commit()
         else:
-            # Table doesn't exist, create it with all columns
             cursor.execute("""
             CREATE TABLE IF NOT EXISTS drhp_reports (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,6 +39,10 @@ def run_migrations():
                 red_flags TEXT,
                 ipo_score REAL,
                 recommendation TEXT,
+                industry TEXT,
+                risk_level TEXT,
+                confidence REAL,
+                structured_data TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """)
@@ -45,29 +55,39 @@ def run_migrations():
 # Run automatic migration checks on module import
 run_migrations()
 
-def save_drhp_report(company_name: str, summary: str, red_flags: str, ipo_score: float, recommendation: str) -> bool:
+def save_drhp_report(
+    company_name: str,
+    summary: str,
+    red_flags: str,
+    ipo_score: float,
+    recommendation: str,
+    industry: str = "Not Specified",
+    risk_level: str = "Moderate",
+    confidence: float = 75.0,
+    structured_data: Optional[Dict[str, Any]] = None
+) -> bool:
     """
     Saves a processed DRHP report with AI analysis results to the database.
-    
-    Args:
-        company_name (str): The name of the IPO company.
-        summary (str): The summary text of the DRHP.
-        red_flags (str): Identified red flags.
-        ipo_score (float): The investment score between 0 and 100.
-        recommendation (str): Final investment recommendation (Invest/Watch/Avoid).
-        
-    Returns:
-        bool: True if saving succeeded, False otherwise.
+    Supports both standard summary strings and full structured analysis objects.
     """
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
+        
+        json_str = json.dumps(structured_data) if structured_data else None
+        
         cursor.execute(
             """
-            INSERT INTO drhp_reports (company_name, summary, red_flags, ipo_score, recommendation) 
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO drhp_reports (
+                company_name, summary, red_flags, ipo_score, recommendation,
+                industry, risk_level, confidence, structured_data
+            ) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (company_name, summary, red_flags, ipo_score, recommendation)
+            (
+                company_name, summary, red_flags, ipo_score, recommendation,
+                industry, risk_level, confidence, json_str
+            )
         )
         conn.commit()
         conn.close()
@@ -79,9 +99,7 @@ def save_drhp_report(company_name: str, summary: str, red_flags: str, ipo_score:
 def get_all_reports() -> List[Dict[str, Any]]:
     """
     Retrieves all stored DRHP reports from the SQLite database.
-    
-    Returns:
-        List[Dict[str, Any]]: A list of dictionaries representing the records.
+    Automatically parses structured_data JSON if available.
     """
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -89,13 +107,26 @@ def get_all_reports() -> List[Dict[str, Any]]:
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT id, company_name, summary, red_flags, ipo_score, recommendation, created_at 
+            SELECT id, company_name, summary, red_flags, ipo_score, recommendation, 
+                   industry, risk_level, confidence, structured_data, created_at 
             FROM drhp_reports 
             ORDER BY created_at DESC
             """
         )
         rows = cursor.fetchall()
-        reports = [dict(row) for row in rows]
+        reports = []
+        for row in rows:
+            rec = dict(row)
+            # Parse JSON string if present
+            s_data = rec.get("structured_data")
+            if s_data:
+                try:
+                    rec["parsed_structured_data"] = json.loads(s_data)
+                except Exception:
+                    rec["parsed_structured_data"] = None
+            else:
+                rec["parsed_structured_data"] = None
+            reports.append(rec)
         conn.close()
         return reports
     except Exception as e:

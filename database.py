@@ -56,7 +56,20 @@ if "ipo_score" not in columns:
 if "recommendation" not in columns:
     cursor.execute("ALTER TABLE drhp_reports ADD COLUMN recommendation TEXT;")
     print("Added recommendation column to drhp_reports table.")
+if "industry" not in columns:
+    cursor.execute("ALTER TABLE drhp_reports ADD COLUMN industry TEXT;")
+    print("Added industry column to drhp_reports table.")
+if "risk_level" not in columns:
+    cursor.execute("ALTER TABLE drhp_reports ADD COLUMN risk_level TEXT;")
+    print("Added risk_level column to drhp_reports table.")
+if "confidence" not in columns:
+    cursor.execute("ALTER TABLE drhp_reports ADD COLUMN confidence REAL;")
+    print("Added confidence column to drhp_reports table.")
+if "structured_data" not in columns:
+    cursor.execute("ALTER TABLE drhp_reports ADD COLUMN structured_data TEXT;")
+    print("Added structured_data column to drhp_reports table.")
 
 conn.commit()
 conn.close()
 print("Database initialized successfully.")
+

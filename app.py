@@ -1,28 +1,34 @@
+import os
+import re
+import json
+import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from dotenv import load_dotenv
-import re
+
+# Load environment variables FIRST before importing any services
+load_dotenv(override=True)
 
 # Import services
 from stock_service import get_stock_info, get_stock_history
 from news_service import get_stock_news, NewsAPIError
 from pdf_processor import extract_pdf_data
 from ipo_service import save_drhp_report, get_all_reports
-
-# Import the four AI functions from gemini_service
 from gemini_service import (
+    analyze_drhp_structured,
+    test_gemini_connection,
     generate_summary,
     generate_red_flags,
     generate_ipo_score,
-    generate_recommendation
+    generate_recommendation,
+    get_api_key
 )
-
-# Load environment variables from .env
-load_dotenv()
+from red_flag_service import analyze_red_flags_structured
 
 # Set page configuration with a premium look
 st.set_page_config(
-    page_title="Financial Research AI Dashboard",
+    page_title="Financial Research AI Platform",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -31,50 +37,59 @@ st.set_page_config(
 # Custom Premium Styling
 st.markdown("""
     <style>
-        /* Modern title styling */
+        /* Modern header styling */
         .main-header {
-            font-size: 2.8rem;
+            font-size: 2.6rem;
             font-weight: 800;
-            background: linear-gradient(90deg, #3f51b5, #00bcd4);
+            background: linear-gradient(90deg, #1e3c72, #2a5298, #00bcd4);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             margin-bottom: 0.2rem;
             font-family: 'Inter', sans-serif;
         }
         .sub-header {
-            font-size: 1.1rem;
+            font-size: 1.05rem;
             color: #718096;
-            margin-bottom: 2rem;
+            margin-bottom: 1.5rem;
             font-family: 'Inter', sans-serif;
         }
-        /* Custom card style */
+        /* Custom hero metric card */
+        .hero-card {
+            background: linear-gradient(135deg, rgba(255,255,255,0.9), rgba(240,244,248,0.9));
+            border-radius: 16px;
+            padding: 1.5rem;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+            border: 1px solid rgba(0,0,0,0.08);
+            text-align: center;
+        }
         .metric-card {
             background-color: #ffffff;
             border-radius: 12px;
-            padding: 1.5rem;
-            box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -1px rgba(0,0,0,0.06);
-            border-left: 5px solid #3f51b5;
+            padding: 1.25rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.04);
+            border-left: 4px solid #3f51b5;
             margin-bottom: 1rem;
         }
-        /* Dark mode compatibility support */
         @media (prefers-color-scheme: dark) {
+            .hero-card {
+                background: linear-gradient(135deg, #1a1f2c, #111522);
+                border: 1px solid rgba(255,255,255,0.1);
+            }
             .metric-card {
                 background-color: #1e1e24;
-                border-left: 5px solid #00bcd4;
-                box-shadow: 0 4px 6px -1px rgba(0,0,0,0.5);
+                border-left: 4px solid #00bcd4;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.4);
             }
         }
-        /* News article styling */
         .news-article {
             padding: 1rem;
             border-bottom: 1px solid rgba(128, 128, 128, 0.2);
         }
         .news-headline {
-            font-size: 1.1rem;
+            font-size: 1.05rem;
             font-weight: 600;
             color: #00bcd4;
             text-decoration: none;
-            vertical-align: middle;
         }
         .news-headline:hover {
             text-decoration: underline;
@@ -92,21 +107,14 @@ st.markdown("""
             border-radius: 4px;
             text-transform: uppercase;
             margin-right: 0.5rem;
-            vertical-align: middle;
             font-family: 'Inter', sans-serif;
         }
-        .sentiment-positive {
-            background-color: #2e7d32;
-            color: #ffffff;
-        }
-        .sentiment-neutral {
-            background-color: #757575;
-            color: #ffffff;
-        }
-        .sentiment-negative {
-            background-color: #c62828;
-            color: #ffffff;
-        }
+        .sentiment-positive { background-color: #2e7d32; color: #ffffff; }
+        .sentiment-neutral { background-color: #757575; color: #ffffff; }
+        .sentiment-negative { background-color: #c62828; color: #ffffff; }
+        .severity-high { background-color: rgba(198, 40, 40, 0.15); color: #d32f2f; border: 1px solid #d32f2f; padding: 2px 8px; border-radius: 4px; font-weight: 700; font-size: 0.8rem; }
+        .severity-medium { background-color: rgba(255, 152, 0, 0.15); color: #f57c00; border: 1px solid #f57c00; padding: 2px 8px; border-radius: 4px; font-weight: 700; font-size: 0.8rem; }
+        .severity-low { background-color: rgba(25, 118, 210, 0.15); color: #1976d2; border: 1px solid #1976d2; padding: 2px 8px; border-radius: 4px; font-weight: 700; font-size: 0.8rem; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -114,16 +122,13 @@ st.markdown("""
 def format_market_cap(val: float, currency: str) -> str:
     if val is None:
         return "N/A"
-    
     if currency == "INR":
-        # Format Indian numbering (Crores, Lakhs)
         if val >= 10**7:
             return f"₹{val / 10**7:,.2f} Cr"
         elif val >= 10**5:
             return f"₹{val / 10**5:,.2f} Lakhs"
         return f"₹{val:,.2f}"
     else:
-        # Standard Global formats (T, B, M)
         symbol = "$" if currency == "USD" else f"{currency} "
         if val >= 10**12:
             return f"{symbol}{val / 10**12:,.2f} T"
@@ -164,561 +169,601 @@ def format_beta(val: float) -> str:
     return f"{val:.2f}"
 
 # Sidebar Navigation
-st.sidebar.markdown("<h2 style='font-family: \"Inter\", sans-serif; font-weight: 700; margin-bottom: 1.5rem;'>Navigation Menu</h2>", unsafe_allow_html=True)
+st.sidebar.markdown("<h2 style='font-family: \"Inter\", sans-serif; font-weight: 700;'>Navigation</h2>", unsafe_allow_html=True)
 page = st.sidebar.radio(
     "Select Module:",
-    ["📈 Stock Dashboard", "🚀 IPO Intelligence"],
+    ["🚀 IPO Intelligence", "📈 Stock Dashboard"],
     index=0,
     label_visibility="collapsed"
 )
 
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🔑 API Status Configuration")
+
+current_key = get_api_key()
+if current_key:
+    st.sidebar.success("🟢 Gemini API Key Detected")
+else:
+    st.sidebar.error("🔴 Gemini API Key Missing")
+    st.sidebar.caption("Set `GEMINI_API_KEY` in `.env` or input below:")
+    user_api_key = st.sidebar.text_input("Enter Gemini API Key:", type="password", help="Temporary session API key.")
+    if user_api_key:
+        os.environ["GEMINI_API_KEY"] = user_api_key
+        st.sidebar.success("Key applied for session!")
+
+st.sidebar.markdown("---")
+st.sidebar.info("💡 **Financial Research AI Platform**\n\nAI-powered prospectus parsing & equity intelligence.")
+
+# ==============================================================================
+# 🚀 MODULE 1: IPO INTELLIGENCE
+# ==============================================================================
 if page == "🚀 IPO Intelligence":
-    # Main IPO Header
     st.markdown("<h1 class='main-header'>🚀 IPO Intelligence</h1>", unsafe_allow_html=True)
-    st.markdown("<p class='sub-header'>Draft Red Herring Prospectus (DRHP) document analysis.</p>", unsafe_allow_html=True)
-    
-    # Upload section
-    st.markdown("### Document Uploader")
-    uploaded_file = st.file_uploader(
-        "Upload Draft Red Herring Prospectus (DRHP) PDF:",
-        type=["pdf"],
-        help="Upload the official DRHP PDF filed with SEBI/regulators."
-    )
-    
+    st.markdown("<p class='sub-header'>Draft Red Herring Prospectus (DRHP) forensic analysis & investment scoring.</p>", unsafe_allow_html=True)
+
+    # Document Uploader
+    with st.container(border=True):
+        st.markdown("### 📄 DRHP Document Uploader")
+        uploaded_file = st.file_uploader(
+            "Upload Draft Red Herring Prospectus (DRHP) PDF:",
+            type=["pdf"],
+            help="Upload official DRHP file registered with regulators (SEBI, SEC, etc.)."
+        )
+
     if uploaded_file is not None:
-        # Read file bytes in memory
         file_bytes = uploaded_file.read()
         filename = uploaded_file.name
-        
-        # Create a unique key for the session state to cache results
-        analysis_key = f"drhp_analysis_{filename}_{len(file_bytes)}"
-        
+        analysis_key = f"drhp_analysis_v2_{filename}_{len(file_bytes)}"
+
         if analysis_key not in st.session_state:
-            # ONE Streamlit spinner for the entire processing and AI analysis
-            with st.spinner("Extracting text and generating Gemini AI insights..."):
-                result = extract_pdf_data(file_bytes, filename)
+            with st.spinner("Processing DRHP pages and analyzing sections with Gemini AI..."):
+                pdf_result = extract_pdf_data(file_bytes, filename)
                 
-                if result["success"]:
-                    try:
-                        text_content = result["text"]
-                        
-                        # Generate the AI components
-                        summary_val = generate_summary(text_content)
-                        red_flags_val = generate_red_flags(text_content)
-                        
-                        # Handle score parsing (convert return to float)
-                        raw_score = generate_ipo_score(text_content)
-                        try:
-                            if isinstance(raw_score, (int, float)):
-                                ipo_score_val = float(raw_score)
-                            else:
-                                score_match = re.search(r"\d+(\.\d+)?", str(raw_score))
-                                ipo_score_val = float(score_match.group(0)) if score_match else 50.0
-                        except Exception:
-                            ipo_score_val = 50.0
-                            
-                        recommendation_val = generate_recommendation(text_content)
-                        
-                        # Cache the successful analysis state
-                        st.session_state[analysis_key] = {
-                            "success": True,
-                            "filename": filename,
-                            "page_count": result["page_count"],
-                            "char_count": result["char_count"],
-                            "summary": summary_val,
-                            "red_flags": red_flags_val,
-                            "ipo_score": ipo_score_val,
-                            "recommendation": recommendation_val
-                        }
-                    except Exception as e:
-                        st.session_state[analysis_key] = {
-                            "success": False,
-                            "error": f"Failed to generate AI analysis: {str(e)}"
-                        }
-                else:
+                if not pdf_result["success"]:
                     st.session_state[analysis_key] = {
                         "success": False,
-                        "error": result["error"]
+                        "error": pdf_result["error"]
                     }
+                else:
+                    text_content = pdf_result["text"]
+                    ai_result = analyze_drhp_structured(text_content)
                     
+                    st.session_state[analysis_key] = {
+                        "success": ai_result["success"],
+                        "filename": filename,
+                        "page_count": pdf_result["page_count"],
+                        "char_count": pdf_result["char_count"],
+                        "raw_text": text_content,
+                        "error": ai_result.get("error"),
+                        "data": ai_result.get("data")
+                    }
+
         analysis = st.session_state[analysis_key]
-        
+
         if not analysis["success"]:
-            st.error(f"Error processing PDF: {analysis['error']}")
+            st.error(f"⚠️ Configuration / Processing Error: {analysis['error']}")
+            st.warning("Please ensure GEMINI_API_KEY is correctly added to your `.env` file or sidebar settings.")
         else:
-            st.success("PDF processed and AI Analysis generated successfully!")
+            d = analysis["data"]
             
-            # File Info Stats Row
-            col_stat1, col_stat2, col_stat3 = st.columns(3)
-            with col_stat1:
-                st.markdown(
-                    f"""
-                    <div class="metric-card">
-                        <div style="font-size: 0.9rem; color: #718096; font-weight: 600; text-transform: uppercase;">File Name</div>
-                        <div style="font-size: 1.25rem; font-weight: 700; color: #3f51b5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{analysis['filename']}</div>
-                    </div>
-                    """, 
-                    unsafe_allow_html=True
-                )
-            with col_stat2:
-                st.markdown(
-                    f"""
-                    <div class="metric-card">
-                        <div style="font-size: 0.9rem; color: #718096; font-weight: 600; text-transform: uppercase;">Page Count</div>
-                        <div style="font-size: 1.5rem; font-weight: 700; color: #3f51b5;">{analysis['page_count']}</div>
-                    </div>
-                    """, 
-                    unsafe_allow_html=True
-                )
-            with col_stat3:
-                st.markdown(
-                    f"""
-                    <div class="metric-card">
-                        <div style="font-size: 0.9rem; color: #718096; font-weight: 600; text-transform: uppercase;">Extracted Characters</div>
-                        <div style="font-size: 1.5rem; font-weight: 700; color: #3f51b5;">{analysis['char_count']:,}</div>
-                    </div>
-                    """, 
-                    unsafe_allow_html=True
-                )
-            
+            # File Header Stats Row
+            col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+            with col_s1:
+                st.metric("Company Name", d["company_name"])
+            with col_s2:
+                st.metric("Industry / Sector", d["industry"])
+            with col_s3:
+                st.metric("DRHP Page Count", f"{analysis['page_count']} Pages")
+            with col_s4:
+                st.metric("Extracted Characters", f"{analysis['char_count']:,} Chars")
+
             st.markdown("<br>", unsafe_allow_html=True)
-            
-            # Redesigned Sections in requested order
-            
-            # 1. AI Summary
-            st.markdown("### 📄 AI Summary")
-            with st.container(border=True):
-                st.markdown(analysis["summary"])
-                
-            st.markdown("---")
-            
-            # 2. Investment Risk Analysis
-            st.markdown("### ⚠️ Investment Risk Analysis")
-            with st.container(border=True):
-                st.markdown(analysis["red_flags"])
-                
-            st.markdown("---")
-            
-            # 3. IPO Investment Score
-            st.markdown("### 📊 IPO Investment Score")
-            score = analysis["ipo_score"]
-            if score >= 75:
-                score_color = "#2e7d32"  # Green
-                score_label = "Strong"
-            elif score >= 50:
-                score_color = "#ff9800"  # Yellow/Orange
-                score_label = "Moderate"
+
+            # ==================================================================
+            # 🏆 HERO METRIC CARDS (SCORE, RISK LEVEL, RECOMMENDATION, CONFIDENCE)
+            # ==================================================================
+            col_score, col_risk, col_rec = st.columns(3)
+
+            score_val = d["investment_score"]
+            if score_val >= 75:
+                score_color = "#2e7d32"
+                score_label = "Strong Investment Quality"
+            elif score_val >= 50:
+                score_color = "#f57c00"
+                score_label = "Moderate Quality"
             else:
-                score_color = "#c62828"  # Red
-                score_label = "Avoid"
-                
-            st.markdown(f"""
-            <div style="background-color: rgba(128, 128, 128, 0.05); padding: 2rem; border-radius: 16px; text-align: center; border: 1px solid rgba(128, 128, 128, 0.15); margin-bottom: 1.5rem; font-family: 'Inter', sans-serif;">
-                <div style="font-size: 0.95rem; text-transform: uppercase; letter-spacing: 2px; color: #718096; margin-bottom: 0.5rem; font-weight: 600;">Overall AI Investment Score</div>
-                <div style="font-size: 4.5rem; font-weight: 800; color: {score_color}; line-height: 1; margin-bottom: 0.5rem;">{score:.1f} <span style="font-size: 1.5rem; color: #718096;">/ 100</span></div>
-                <div style="display: inline-block; padding: 0.35rem 1.25rem; border-radius: 20px; font-size: 0.9rem; font-weight: 700; color: {score_color}; text-transform: uppercase; border: 2.5px solid {score_color}; background-color: rgba(128, 128, 128, 0.02);">
-                    {score_label} Rating
+                score_color = "#c62828"
+                score_label = "High Risk / Caution"
+
+            with col_score:
+                st.markdown(f"""
+                <div class="hero-card">
+                    <div style="font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1.5px; color: #718096; font-weight: 700;">AI INVESTMENT SCORE</div>
+                    <div style="font-size: 3.8rem; font-weight: 800; color: {score_color}; line-height: 1.1; margin: 0.5rem 0;">
+                        {score_val:.1f} <span style="font-size: 1.2rem; color: #718096;">/ 100</span>
+                    </div>
+                    <div style="font-size: 0.85rem; font-weight: 700; color: {score_color}; text-transform: uppercase;">
+                        {score_label}
+                    </div>
                 </div>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            st.markdown("---")
-            
-            # 4. Final Recommendation
-            st.markdown("### 💡 Final Recommendation")
-            rec = analysis["recommendation"]
-            rec_upper = str(rec).upper()
-            
-            if "INVEST" in rec_upper:
-                rec_color = "#2e7d32"      # Green
-                rec_bg = "rgba(46, 125, 50, 0.08)"
-                rec_border = "#2e7d32"
+                """, unsafe_allow_html=True)
+
+            risk_level = d["risk_level"]
+            if risk_level == "Low":
+                risk_color = "#2e7d32"
+                risk_bg = "rgba(46, 125, 50, 0.1)"
+            elif risk_level == "High":
+                risk_color = "#c62828"
+                risk_bg = "rgba(198, 40, 40, 0.1)"
+            else:
+                risk_color = "#f57c00"
+                risk_bg = "rgba(245, 124, 0, 0.1)"
+
+            with col_risk:
+                st.markdown(f"""
+                <div class="hero-card">
+                    <div style="font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1.5px; color: #718096; font-weight: 700;">RISK LEVEL</div>
+                    <div style="font-size: 2.8rem; font-weight: 800; color: {risk_color}; line-height: 1.2; margin: 0.75rem 0;">
+                        {risk_level.upper()}
+                    </div>
+                    <div style="font-size: 0.85rem; color: #718096; font-weight: 600;">
+                        Data Confidence: <strong>{d['confidence']:.0f}%</strong>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            rec_val = d["recommendation"].upper()
+            if "POSITIVE" in rec_val or "INVEST" in rec_val:
+                rec_color = "#2e7d32"
                 rec_icon = "🟢"
-                rec_text = "INVEST"
-            elif "AVOID" in rec_upper:
-                rec_color = "#c62828"      # Red
-                rec_bg = "rgba(198, 40, 40, 0.08)"
-                rec_border = "#c62828"
+            elif "NEGATIVE" in rec_val or "AVOID" in rec_val:
+                rec_color = "#c62828"
                 rec_icon = "🔴"
-                rec_text = "AVOID"
             else:
-                rec_color = "#ff9800"      # Yellow/Orange
-                rec_bg = "rgba(255, 152, 0, 0.08)"
-                rec_border = "#ff9800"
+                rec_color = "#f57c00"
                 rec_icon = "🟡"
-                rec_text = "WATCH"
-                
-            st.markdown(f"""
-            <div style="background-color: {rec_bg}; padding: 1.75rem; border-radius: 12px; border: 1px solid {rec_border}; border-left: 8px solid {rec_border}; margin-top: 0.5rem; margin-bottom: 2rem; font-family: 'Inter', sans-serif;">
-                <h3 style="color: {rec_color}; margin: 0 0 0.75rem 0; font-family: 'Inter', sans-serif; display: flex; align-items: center; font-weight: 700;">
-                    <span style="margin-right: 0.5rem;">{rec_icon}</span> recommendation: {rec_text}
-                </h3>
-                <div style="font-size: 1rem; line-height: 1.6; color: inherit;">
-                    {rec}
+
+            with col_rec:
+                st.markdown(f"""
+                <div class="hero-card">
+                    <div style="font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1.5px; color: #718096; font-weight: 700;">RECOMMENDATION</div>
+                    <div style="font-size: 2.2rem; font-weight: 800; color: {rec_color}; line-height: 1.2; margin: 0.75rem 0;">
+                        {rec_icon} {d['recommendation'].upper()}
+                    </div>
+                    <div style="font-size: 0.85rem; color: #718096; font-weight: 600;">
+                        AI Forensic Assessment
+                    </div>
                 </div>
-            </div>
-            """, unsafe_allow_html=True)
-            
+                """, unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.warning("⚠️ **AI Advisory Disclaimer**: This report is automatically generated using Gemini AI section extraction on official DRHP disclosures. It is intended solely for research and analytical reference and does not constitute investment advice.")
+
             st.markdown("---")
+
+            # ==================================================================
+            # 📊 12 STRUCTURED DASHBOARD SECTIONS
+            # ==================================================================
             
-            # Database Save option
-            st.subheader("Save Analysis to Local Database")
-            
-            # Deduce a neat default company name from the filename
-            default_company_name = filename.replace(".pdf", "").replace("_", " ").replace("-", " ").title()
-            
-            save_col1, save_col2 = st.columns([3, 1])
-            with save_col1:
-                company_name = st.text_input(
-                    "Confirm/Edit Company Name:",
-                    value=default_company_name,
-                    help="Verify or enter the company name under which to store this DRHP report."
-                )
-            with save_col2:
-                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-                save_btn = st.button("Save Analysis", type="primary", use_container_width=True)
+            # 1. Company Overview & Business Model
+            c_col1, c_col2 = st.columns(2)
+            with c_col1:
+                with st.container(border=True):
+                    st.markdown("### 🏢 1. Company Overview")
+                    st.write(d["business_summary"])
+
+            with c_col2:
+                with st.container(border=True):
+                    st.markdown("### ⚙️ 2. Business Model")
+                    st.write(d["business_model"])
+
+            # 3. Products & Services & 4. IPO Details
+            p_col1, p_col2 = st.columns(2)
+            with p_col1:
+                with st.container(border=True):
+                    st.markdown("### 📦 3. Products & Services")
+                    if d["products_services"]:
+                        for prod in d["products_services"]:
+                            st.markdown(f"• {prod}")
+                    else:
+                        st.info("Product details not specified.")
+
+            with p_col2:
+                with st.container(border=True):
+                    st.markdown("### 📋 4. IPO Structure & Details")
+                    if d["ipo_details"]:
+                        for ipo_item in d["ipo_details"]:
+                            st.markdown(f"• {ipo_item}")
+                    else:
+                        st.info("IPO structure details not explicitly defined in extracted text.")
+
+            # 5. Financial Highlights & Revenue Sources
+            with st.container(border=True):
+                st.markdown("### 📈 5. Financial Highlights & Revenue Breakdown")
+                f_col1, f_col2 = st.columns(2)
+                with f_col1:
+                    st.markdown("#### Key Financial Metrics")
+                    if d["financial_highlights"]:
+                        for fh in d["financial_highlights"]:
+                            st.markdown(f"• **{fh}**")
+                    else:
+                        st.info("Financial statements data not extracted.")
+                with f_col2:
+                    st.markdown("#### Revenue Streams")
+                    if d["revenue_sources"]:
+                        for rev in d["revenue_sources"]:
+                            st.markdown(f"• {rev}")
+                    else:
+                        st.info("Revenue stream details not specified.")
+
+            # 6. Strengths & Competitive Moats
+            with st.container(border=True):
+                st.markdown("### 🛡️ 6. Company Strengths & Competitive Advantages")
+                if d["strengths"]:
+                    s_cols = st.columns(2)
+                    for idx, str_item in enumerate(d["strengths"]):
+                        with s_cols[idx % 2]:
+                            st.success(f"✓ **{str_item}**")
+                else:
+                    st.info("No explicit strengths mentioned.")
+
+            # 7. Red Flags & Forensic Analysis
+            with st.container(border=True):
+                st.markdown("### 🚨 7. Forensic Red Flag Analysis")
+                red_flags = d.get("red_flags", [])
+                if not red_flags:
+                    st.success("🎉 No severe critical red flags detected in extracted sections.")
+                else:
+                    for rf in red_flags:
+                        sev = rf.get("severity", "Medium")
+                        sev_class = "severity-high" if sev == "High" else ("severity-medium" if sev == "Medium" else "severity-low")
+                        cat = rf.get("category", "General")
+                        
+                        st.markdown(f"""
+                        <div style="background-color: rgba(128,128,128,0.05); padding: 1rem; border-radius: 8px; border-left: 4px solid {'#d32f2f' if sev=='High' else '#f57c00'}; margin-bottom: 0.75rem;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.3rem;">
+                                <strong style="font-size: 1.05rem;">{rf['title']}</strong>
+                                <span class="{sev_class}">{sev.upper()} SEVERITY</span>
+                            </div>
+                            <div style="font-size: 0.85rem; color: #718096; margin-bottom: 0.3rem;">Category: <strong>{cat}</strong></div>
+                            <div style="font-size: 0.95rem; color: inherit;">{rf['evidence']}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+            # 8. General Risk Factors & 9. Growth Opportunities
+            rg_col1, rg_col2 = st.columns(2)
+            with rg_col1:
+                with st.container(border=True):
+                    st.markdown("### ⚠️ 8. Risk Factors Analysis")
+                    if d["risks"]:
+                        for rk in d["risks"]:
+                            st.markdown(f"• {rk}")
+                    else:
+                        st.info("No general risks identified.")
+
+            with rg_col2:
+                with st.container(border=True):
+                    st.markdown("### 🚀 9. Growth Catalysts & Opportunities")
+                    if d["growth_opportunities"]:
+                        for go_item in d["growth_opportunities"]:
+                            st.markdown(f"• {go_item}")
+                    else:
+                        st.info("Growth opportunities not specified.")
+
+            # 10. Competitor Analysis & 11. Use of IPO Proceeds
+            cp_col1, cp_col2 = st.columns(2)
+            with cp_col1:
+                with st.container(border=True):
+                    st.markdown("### ⚔️ 10. Competitors & Industry Peers")
+                    if d["competitors"]:
+                        for comp in d["competitors"]:
+                            st.markdown(f"• **{comp}**")
+                    else:
+                        st.info("Competitor information not listed.")
+
+            with cp_col2:
+                with st.container(border=True):
+                    st.markdown("### 🎯 11. Objects of the Offer & Use of Proceeds")
+                    if d["use_of_proceeds"]:
+                        for uop in d["use_of_proceeds"]:
+                            st.markdown(f"• {uop}")
+                    else:
+                        st.info("Use of proceeds not specified.")
+
+            # 12. Transparent AI Investment Score Breakdown & Reasoning
+            with st.container(border=True):
+                st.markdown("### 🧠 12. AI Investment Score Rationale & Category Breakdown")
                 
-            if save_btn:
-                if not company_name.strip():
+                sb = d.get("score_breakdown", {})
+                sb_c1, sb_c2, sb_c3, sb_c4, sb_c5 = st.columns(5)
+                with sb_c1:
+                    st.metric("Financial Health", f"{sb.get('financial_health', 10):.1f} / 20")
+                with sb_c2:
+                    st.metric("Growth Potential", f"{sb.get('growth_potential', 10):.1f} / 20")
+                with sb_c3:
+                    st.metric("Business Quality", f"{sb.get('business_quality', 10):.1f} / 20")
+                with sb_c4:
+                    st.metric("Industry Position", f"{sb.get('industry_position', 10):.1f} / 20")
+                with sb_c5:
+                    st.metric("Risk Profile", f"{sb.get('risk_profile', 10):.1f} / 20")
+                    
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.markdown(f"**Investment Rationale**: {d['recommendation_reason']}")
+
+            st.markdown("---")
+
+            # Expandable Raw Text View
+            with st.expander("🔍 View Extracted Raw DRHP Text"):
+                st.text_area("Extracted Document Text", value=analysis["raw_text"], height=300)
+
+            st.markdown("---")
+
+            # Save to Database Section
+            st.subheader("💾 Save DRHP Analysis to Local Database")
+            save_c1, save_c2 = st.columns([3, 1])
+            with save_c1:
+                comp_save_name = st.text_input("Company Name to Register:", value=d["company_name"])
+            with save_c2:
+                st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                save_clicked = st.button("Save Analysis", type="primary", use_container_width=True)
+
+            if save_clicked:
+                if not comp_save_name.strip():
                     st.warning("Please enter a valid company name.")
                 else:
-                    save_success = save_drhp_report(
-                        company_name=company_name.strip(),
-                        summary=analysis["summary"],
-                        red_flags=analysis["red_flags"],
-                        ipo_score=analysis["ipo_score"],
-                        recommendation=analysis["recommendation"]
+                    saved_ok = save_drhp_report(
+                        company_name=comp_save_name.strip(),
+                        summary=d["business_summary"],
+                        red_flags=json.dumps(d["red_flags"]),
+                        ipo_score=d["investment_score"],
+                        recommendation=d["recommendation"],
+                        industry=d["industry"],
+                        risk_level=d["risk_level"],
+                        confidence=d["confidence"],
+                        structured_data=d
                     )
-                    if save_success:
-                        st.success(f"Successfully saved DRHP analysis for {company_name} to database!")
+                    if saved_ok:
+                        st.success(f"Successfully saved DRHP Analysis for {comp_save_name} to database!")
                     else:
-                        st.error("Failed to save the report to the local database.")
-                        
-    # List previously saved reports from database
+                        st.error("Failed to save report to SQLite database.")
+
+    # Saved Reports Section
     st.markdown("---")
-    st.subheader("Saved DRHP Reports in Database")
+    st.subheader("🗄️ Stored DRHP Reports in Database")
     saved_reports = get_all_reports()
+
     if not saved_reports:
-        st.info("No saved reports found in the database yet. Upload a DRHP PDF above and start analyzing.")
+        st.info("No saved reports found in database yet. Upload a DRHP PDF above to analyze and store.")
     else:
-        for report in saved_reports:
-            rec_saved = report.get("recommendation")
-            if rec_saved is None:
-                rec_saved = "N/A"
-                
-            score_saved = report.get("ipo_score")
+        for r in saved_reports:
+            r_name = r.get("company_name", "Unknown Company")
+            r_score = r.get("ipo_score", 0.0)
+            r_rec = r.get("recommendation", "N/A")
+            r_date = r.get("created_at", "")
+            r_ind = r.get("industry") or "General"
             
-            # Format score values safely
-            if score_saved is None:
-                score_str = "N/A"
-                score_val_str = "N/A"
-            else:
-                try:
-                    score_val = float(score_saved)
-                    score_str = f"{score_val:.0f}"
-                    score_val_str = f"{score_val:.1f}"
-                except (ValueError, TypeError):
-                    score_str = "N/A"
-                    score_val_str = "N/A"
-            
-            # Get color code / status icon
-            rec_saved_upper = str(rec_saved).upper()
-            if "INVEST" in rec_saved_upper:
-                badge_icon = "🟢"
-            elif "AVOID" in rec_saved_upper:
-                badge_icon = "🔴"
-            else:
-                badge_icon = "🟡"
-                
-            expander_title = f"📄 {report['company_name']} | {badge_icon} Score: {score_str}/100 — Saved on {report['created_at']}"
-            
-            with st.expander(expander_title):
-                st.markdown(f"### {report['company_name']}")
-                
-                # Show key metrics in 2 columns
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.metric(label="Investment Score", value=f"{score_val_str} / 100")
-                with c2:
-                    st.metric(label="Recommendation", value=str(rec_saved))
-                
-                st.markdown("#### 📄 AI Summary")
-                st.markdown(report.get("summary") or "No summary available.")
-                
-                st.markdown("#### ⚠️ Investment Risk Analysis")
-                st.markdown(report.get("red_flags") or "No risk analysis available.")
-                
-    st.stop()  # Prevents executing the rest of app.py (the Stock Dashboard page)
+            badge_icon = "🟢" if "POSITIVE" in str(r_rec).upper() or "INVEST" in str(r_rec).upper() else ("🔴" if "NEGATIVE" in str(r_rec).upper() or "AVOID" in str(r_rec).upper() else "🟡")
+            exp_title = f"📄 {r_name} ({r_ind}) | {badge_icon} Score: {r_score:.1f}/100 — Recommendation: {r_rec} (Saved {r_date})"
+
+            with st.expander(exp_title):
+                parsed = r.get("parsed_structured_data")
+                if parsed:
+                    st.markdown(f"### {parsed['company_name']} - {parsed['industry']}")
+                    m1, m2, m3, m4 = st.columns(4)
+                    with m1:
+                        st.metric("Investment Score", f"{parsed['investment_score']:.1f} / 100")
+                    with m2:
+                        st.metric("Risk Level", parsed["risk_level"])
+                    with m3:
+                        st.metric("Recommendation", parsed["recommendation"])
+                    with m4:
+                        st.metric("Confidence", f"{parsed['confidence']:.0f}%")
+                    
+                    st.markdown("#### Business Summary")
+                    st.write(parsed["business_summary"])
+                    st.markdown("#### Recommendation Reason")
+                    st.write(parsed["recommendation_reason"])
+                else:
+                    st.markdown(f"### {r_name}")
+                    m1, m2 = st.columns(2)
+                    with m1:
+                        st.metric("Investment Score", f"{r_score:.1f} / 100")
+                    with m2:
+                        st.metric("Recommendation", r_rec)
+                    st.markdown("#### Summary")
+                    st.write(r.get("summary") or "No summary available.")
 
 # ==============================================================================
-# Main Application (Stock Dashboard Page)
+# 📈 MODULE 2: STOCK DASHBOARD
 # ==============================================================================
-st.markdown("<h1 class='main-header'>📈 Financial Research AI</h1>", unsafe_allow_html=True)
-st.markdown("<p class='sub-header'>State-of-the-art equity analytics for Indian and global markets.</p>", unsafe_allow_html=True)
+else:
+    st.markdown("<h1 class='main-header'>📈 Financial Research AI</h1>", unsafe_allow_html=True)
+    st.markdown("<p class='sub-header'>Equity dashboard with Plotly candlestick charting, moving averages, and news sentiment.</p>", unsafe_allow_html=True)
 
-# Search Input Section
-col1, col2 = st.columns([3, 1])
+    # Search Box
+    col_input, col_btn = st.columns([3, 1])
+    with col_input:
+        ticker_input = st.text_input(
+            "Enter Stock Ticker Symbol:",
+            value="RELIANCE.NS",
+            placeholder="e.g. RELIANCE.NS, TCS.NS, AAPL, MSFT",
+            help="For Indian stocks listed on NSE, append '.NS' (e.g. RELIANCE.NS). For BSE, append '.BO'."
+        ).strip()
 
-with col1:
-    ticker_input = st.text_input(
-        "Enter Stock Symbol:",
-        value="RELIANCE.NS",
-        placeholder="e.g. RELIANCE.NS, TCS.NS, INFY.NS, AAPL",
-        help="For Indian stocks listed on NSE, append '.NS' (e.g. RELIANCE.NS). For BSE, append '.BO'."
-    ).strip()
-    
-with col2:
-    st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
-    analyze_button = st.button("Analyze Stock", type="primary", use_container_width=True)
+    with col_btn:
+        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+        analyze_stock_btn = st.button("Analyze Ticker", type="primary", use_container_width=True)
 
-# State initialization or trigger of analyze action
-if analyze_button or ticker_input:
-    if not ticker_input:
-        st.warning("Please enter a valid stock ticker symbol.")
-    else:
-        with st.spinner(f"Analyzing {ticker_input.upper()}..."):
+    if ticker_input or analyze_stock_btn:
+        with st.spinner(f"Fetching market data for {ticker_input.upper()}..."):
             stock_data = get_stock_info(ticker_input)
-            
+
             if not stock_data["success"]:
                 st.error(stock_data["error"])
             else:
-                # 1. Header Metrics Card
-                st.markdown(f"### {stock_data['company_name']} ({stock_data['symbol']})")
-                
-                # 2. Key Metrics Row
-                m_col1, m_col2, m_col3 = st.columns(3)
-                
-                # Format variables
                 curr = stock_data["currency"]
-                price_formatted = format_price(stock_data["current_price"], curr)
-                mcap_formatted = format_market_cap(stock_data["market_cap"], curr)
-                pe_formatted = format_pe(stock_data["pe_ratio"])
-                
-                with m_col1:
-                    st.metric(
-                        label="Current Price",
-                        value=price_formatted,
-                        help="Last traded price of the security."
-                    )
-                with m_col2:
-                    st.metric(
-                        label="Market Capitalization",
-                        value=mcap_formatted,
-                        help="Total value of the company's outstanding shares."
-                    )
-                with m_col3:
-                    st.metric(
-                        label="PE Ratio (Price/Earnings)",
-                        value=pe_formatted,
-                        help="Ratio of stock price to earnings per share."
-                    )
-                
+                st.markdown(f"### {stock_data['company_name']} (`{stock_data['symbol']}`)")
+
+                # Metric Cards Row 1
+                mc1, mc2, mc3, mc4 = st.columns(4)
+                with mc1:
+                    st.metric("Current Price", format_price(stock_data["current_price"], curr))
+                with mc2:
+                    st.metric("Market Cap", format_market_cap(stock_data["market_cap"], curr))
+                with mc3:
+                    st.metric("PE Ratio (P/E)", format_pe(stock_data["pe_ratio"]))
+                with mc4:
+                    st.metric("Volume", format_volume(stock_data["volume"]))
+
+                # Metric Cards Row 2
+                k1, k2, k3, k4, k5 = st.columns(5)
+                with k1:
+                    st.metric("52W High", format_price(stock_data["fifty_two_week_high"], curr))
+                with k2:
+                    st.metric("52W Low", format_price(stock_data["fifty_two_week_low"], curr))
+                with k3:
+                    st.metric("Dividend Yield", format_percentage(stock_data["dividend_yield"]))
+                with k4:
+                    st.metric("Avg Volume", format_volume(stock_data["average_volume"]))
+                with k5:
+                    st.metric("Beta", format_beta(stock_data["beta"]))
+
                 st.markdown("---")
-                
-                # 2b. Key Stock Indicators
-                st.markdown("##### Key Stock Indicators")
-                k_col1, k_col2, k_col3, k_col4, k_col5 = st.columns(5)
-                
-                high_formatted = format_price(stock_data["fifty_two_week_high"], curr)
-                low_formatted = format_price(stock_data["fifty_two_week_low"], curr)
-                div_formatted = format_percentage(stock_data["dividend_yield"])
-                vol_formatted = format_volume(stock_data["average_volume"])
-                beta_formatted = format_beta(stock_data["beta"])
-                
-                with k_col1:
-                    st.metric(label="52 Week High", value=high_formatted)
-                with k_col2:
-                    st.metric(label="52 Week Low", value=low_formatted)
-                with k_col3:
-                    st.metric(label="Dividend Yield", value=div_formatted)
-                with k_col4:
-                    st.metric(label="Average Volume", value=vol_formatted)
-                with k_col5:
-                    st.metric(label="Beta", value=beta_formatted)
-                
-                st.markdown("---")
-                
-                # 3. Interactive Historical Price Chart with Moving Averages
-                st.subheader(
-                    "Historical Performance", 
-                    help=(
-                        "Technical Indicators:\n\n"
-                        "• **Close Price**: The closing price trend (blue line).\n"
-                        "• **50 Day Moving Average (50 DMA)**: The rolling average of the last 50 trading days (orange line). Indicates short-term trend direction.\n"
-                        "• **200 Day Moving Average (200 DMA)**: The rolling average of the last 200 trading days (pink line). Indicates long-term trend direction.\n\n"
-                        "💡 **Interpretation**: A 'Golden Cross' occurs when the 50 DMA crosses above the 200 DMA, suggesting a bullish upward trend. A 'Death Cross' occurs when the 50 DMA crosses below the 200 DMA, suggesting a bearish trend.\n\n"
-                        "⚠️ *Note: Moving Averages are calculated on daily historical intervals and are shown for 1 Year, 5 Years, and All Time timeframes.*"
-                    )
-                )
-                
-                # Horizontal Timeframe Selector
+
+                # Interactive Candlestick + Moving Average + Volume Chart
+                st.subheader("📊 Interactive Technical Performance Chart")
+
                 timeframe = st.radio(
-                    "Select Timeframe:",
-                    options=["1 Day", "5 Days", "1 Week", "1 Month", "6 Months", "1 Year", "5 Years", "All Time"],
-                    index=5,  # Defaults to "1 Year"
+                    "Select Timeframe Range:",
+                    options=["1 Day", "5 Days", "1 Month", "6 Months", "1 Year", "5 Years", "All Time"],
+                    index=4,
                     horizontal=True,
                     label_visibility="collapsed"
                 )
-                
-                # Configuration map for different chart ranges
-                timeframe_configs = {
-                    "1 Day": {"period": "1d", "interval": "15m", "dma": False, "slice": None},
-                    "5 Days": {"period": "5d", "interval": "30m", "dma": False, "slice": None},
-                    "1 Week": {"period": "7d", "interval": "30m", "dma": False, "slice": None},
-                    "1 Month": {"period": "1mo", "interval": "1d", "dma": False, "slice": None},
-                    "6 Months": {"period": "6mo", "interval": "1d", "dma": False, "slice": None},
-                    "1 Year": {"period": "2y", "interval": "1d", "dma": True, "slice": 252},
-                    "5 Years": {"period": "6y", "interval": "1d", "dma": True, "slice": 1260},
-                    "All Time": {"period": "max", "interval": "1d", "dma": True, "slice": "all_time"}
+
+                tf_map = {
+                    "1 Day": {"period": "1d", "interval": "15m", "dma": False},
+                    "5 Days": {"period": "5d", "interval": "30m", "dma": False},
+                    "1 Month": {"period": "1mo", "interval": "1d", "dma": False},
+                    "6 Months": {"period": "6mo", "interval": "1d", "dma": False},
+                    "1 Year": {"period": "2y", "interval": "1d", "dma": True, "tail": 252},
+                    "5 Years": {"period": "6y", "interval": "1d", "dma": True, "tail": 1260},
+                    "All Time": {"period": "max", "interval": "1d", "dma": True, "tail": None}
                 }
-                
-                cfg = timeframe_configs[timeframe]
-                
-                # Fetch history according to config
-                history_df = get_stock_history(stock_data["symbol"], period=cfg["period"], interval=cfg["interval"])
-                
-                if history_df is not None and not history_df.empty:
-                    # Calculate Moving Averages if applicable
+
+                cfg = tf_map[timeframe]
+                hist_df = get_stock_history(stock_data["symbol"], period=cfg["period"], interval=cfg["interval"])
+
+                if hist_df is not None and not hist_df.empty:
+                    # Calculate Moving Averages
                     if cfg["dma"]:
-                        history_df["50_DMA"] = history_df["Close"].rolling(window=50).mean()
-                        history_df["200_DMA"] = history_df["Close"].rolling(window=200).mean()
-                        
-                        # Slice data for the visual range
-                        if cfg["slice"] == "all_time":
-                            # For All Time, start from row 200 onwards to skip early NaN averages
-                            chart_df = history_df.iloc[200:] if len(history_df) > 200 else history_df
-                        elif cfg["slice"] is not None:
-                            chart_df = history_df.tail(cfg["slice"])
-                        else:
-                            chart_df = history_df
+                        hist_df["50_DMA"] = hist_df["Close"].rolling(window=50).mean()
+                        hist_df["200_DMA"] = hist_df["Close"].rolling(window=200).mean()
+
+                    if cfg.get("tail") and len(hist_df) > cfg["tail"]:
+                        chart_df = hist_df.tail(cfg["tail"])
                     else:
-                        chart_df = history_df
-                    
-                    # Render Plotly Chart
-                    fig = go.Figure()
-                    
-                    # Close Price trace
-                    fig.add_trace(
-                        go.Scatter(
-                            x=chart_df.index,
-                            y=chart_df["Close"],
-                            name="Close Price",
-                            line=dict(color="#00bcd4", width=2.5),
-                            fill="tozeroy",
-                            fillcolor="rgba(0, 188, 212, 0.05)"
-                        )
+                        chart_df = hist_df
+
+                    # Create Plotly combo figure (Candlestick + Volume)
+                    fig = make_subplots(
+                        rows=2, cols=1,
+                        shared_xaxes=True,
+                        vertical_spacing=0.03,
+                        subplot_titles=(f"{stock_data['symbol']} Price Action ({curr})", "Volume"),
+                        row_heights=[0.75, 0.25]
                     )
-                    
-                    # Overlay moving averages if configured
+
+                    # Candlestick Trace
+                    fig.add_trace(
+                        go.Candlestick(
+                            x=chart_df.index,
+                            open=chart_df["Open"],
+                            high=chart_df["High"],
+                            low=chart_df["Low"],
+                            close=chart_df["Close"],
+                            name="Price (OHLC)",
+                            increasing_line_color="#2e7d32",
+                            decreasing_line_color="#c62828"
+                        ),
+                        row=1, col=1
+                    )
+
+                    # Overlay Moving Averages
                     if cfg["dma"] and "50_DMA" in chart_df.columns:
                         fig.add_trace(
                             go.Scatter(
-                                x=chart_df.index,
-                                y=chart_df["50_DMA"],
-                                name="50 Day MA (50 DMA)",
-                                line=dict(color="#ff9800", width=1.5, dash="dash")
-                            )
+                                x=chart_df.index, y=chart_df["50_DMA"],
+                                name="50 DMA", line=dict(color="#ff9800", width=1.5)
+                            ),
+                            row=1, col=1
                         )
                     if cfg["dma"] and "200_DMA" in chart_df.columns:
                         fig.add_trace(
                             go.Scatter(
-                                x=chart_df.index,
-                                y=chart_df["200_DMA"],
-                                name="200 Day MA (200 DMA)",
-                                line=dict(color="#e91e63", width=1.5, dash="dot")
-                            )
+                                x=chart_df.index, y=chart_df["200_DMA"],
+                                name="200 DMA", line=dict(color="#e91e63", width=1.5)
+                            ),
+                            row=1, col=1
                         )
-                    
-                    xaxis_title = "Time" if timeframe in ["1 Day", "5 Days", "1 Week"] else "Date"
-                    
+
+                    # Volume Bar Trace
+                    colors = ["#2e7d32" if c >= o else "#c62828" for c, o in zip(chart_df["Close"], chart_df["Open"])]
+                    fig.add_trace(
+                        go.Bar(
+                            x=chart_df.index, y=chart_df["Volume"],
+                            name="Volume", marker_color=colors, opacity=0.7
+                        ),
+                        row=2, col=1
+                    )
+
                     fig.update_layout(
-                        margin=dict(l=0, r=0, t=10, b=10),
-                        xaxis=dict(
-                            showgrid=True,
-                            gridcolor="rgba(128, 128, 128, 0.15)",
-                            title=xaxis_title
-                        ),
-                        yaxis=dict(
-                            showgrid=True,
-                            gridcolor="rgba(128, 128, 128, 0.15)",
-                            title=f"Price ({curr})"
-                        ),
+                        xaxis_rangeslider_visible=False,
                         hovermode="x unified",
+                        margin=dict(l=10, r=10, t=30, b=10),
+                        height=500,
                         plot_bgcolor="rgba(0,0,0,0)",
-                        paper_bgcolor="rgba(0,0,0,0)",
-                        height=400
+                        paper_bgcolor="rgba(0,0,0,0)"
                     )
-                    
-                    st.plotly_chart(fig, width="stretch")
+
+                    st.plotly_chart(fig, use_container_width=True)
                 else:
-                    st.warning(f"Historical price data could not be retrieved for period '{timeframe}'.")
-                
+                    st.warning(f"Could not retrieve historical price chart for timeframe '{timeframe}'.")
+
                 st.markdown("---")
-                
-                # 4. About / Summary Section
-                with st.expander("About the Company", expanded=True):
+
+                # Company Summary
+                with st.expander("🏢 Company Profile & Overview", expanded=True):
                     st.write(stock_data["summary"])
-                
+
                 st.markdown("---")
-                
-                # 5. News Integration Section
-                st.subheader("Latest News Coverage")
+
+                # News Coverage & Sentiment Analysis
+                st.subheader("📰 Recent Market News & Sentiment Analysis")
                 try:
-                    news_articles = get_stock_news(stock_data["company_name"])
+                    articles = get_stock_news(stock_data["company_name"])
                     
-                    # Calculate sentiment metrics
-                    pos_count = sum(1 for a in news_articles if a["sentiment"] == "Positive")
-                    neu_count = sum(1 for a in news_articles if a["sentiment"] == "Neutral")
-                    neg_count = sum(1 for a in news_articles if a["sentiment"] == "Negative")
-                    
-                    # Classification logic based on positive vs negative article count voting
-                    if pos_count > neg_count:
-                        overall_sentiment = "Bullish"
-                        sentiment_color = "#2e7d32"  # green
-                    elif neg_count > pos_count:
-                        overall_sentiment = "Bearish"
-                        sentiment_color = "#c62828"  # red
-                    else:
-                        overall_sentiment = "Neutral"
-                        sentiment_color = "#757575"  # gray
-                        
-                    # Overall news sentiment summary card
-                    st.markdown(
-                        f"""
-                        <div style="background-color: rgba(128, 128, 128, 0.05); padding: 1.25rem; border-radius: 8px; border-left: 5px solid {sentiment_color}; margin-bottom: 1.5rem; font-family: 'Inter', sans-serif;">
-                            <h4 style="margin: 0 0 0.5rem 0; font-weight: 700;">Overall News Sentiment: <span style="color: {sentiment_color};">{overall_sentiment}</span></h4>
-                            <div style="font-size: 0.9rem; color: #718096;">
-                                Sentiment category calculated by comparing the volume of Positive and Negative articles. 
-                                (Voting logic: Bullish if Positive > Negative, Bearish if Negative > Positive, otherwise Neutral).
-                            </div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True
-                    )
-                    
-                    # 3-column metric layout for distribution counts
+                    pos = sum(1 for a in articles if a["sentiment"] == "Positive")
+                    neu = sum(1 for a in articles if a["sentiment"] == "Neutral")
+                    neg = sum(1 for a in articles if a["sentiment"] == "Negative")
+
                     s_col1, s_col2, s_col3 = st.columns(3)
                     with s_col1:
-                        st.metric(label="Positive Articles", value=pos_count)
+                        st.metric("Positive Articles", pos)
                     with s_col2:
-                        st.metric(label="Neutral Articles", value=neu_count)
+                        st.metric("Neutral Articles", neu)
                     with s_col3:
-                        st.metric(label="Negative Articles", value=neg_count)
-                        
+                        st.metric("Negative Articles", neg)
+
                     st.markdown("<br>", unsafe_allow_html=True)
-                    
-                    # Render individual articles
-                    for article in news_articles:
-                        st.markdown(
-                            f"""
-                            <div class="news-article">
-                                <span class="sentiment-badge sentiment-{article['sentiment'].lower()}">{article['sentiment']}</span>
-                                <a class="news-headline" href="{article['url']}" target="_blank">{article['headline']}</a>
-                                <div class="news-meta">Source: {article['source']} | Published: {article['publication_date']}</div>
-                            </div>
-                            """,
-                            unsafe_allow_html=True
-                        )
+                    for art in articles:
+                        st.markdown(f"""
+                        <div class="news-article">
+                            <span class="sentiment-badge sentiment-{art['sentiment'].lower()}">{art['sentiment']}</span>
+                            <a class="news-headline" href="{art['url']}" target="_blank">{art['headline']}</a>
+                            <div class="news-meta">Source: {art['source']} | Published: {art['publication_date']}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
                 except NewsAPIError as e:
-                    # Graceful error handling for news failures
-                    st.warning(f"Could not retrieve news articles: {str(e)}")
+                    st.warning(f"Could not fetch news articles: {str(e)}")
