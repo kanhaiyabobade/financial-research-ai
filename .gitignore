@@ -11,6 +11,10 @@ __pycache__/
 # OS metadata
 .DS_Store
 
+# Virtual Environments
+venv/
+.venv/
 
 .env.example
+
 

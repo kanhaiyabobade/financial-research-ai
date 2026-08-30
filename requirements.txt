@@ -4,6 +4,7 @@ pandas
 plotly
 requests
 textblob
-google-generativeai
+google-genai
 pymupdf
 python-dotenv
+

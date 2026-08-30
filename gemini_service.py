@@ -2,73 +2,111 @@ import os
 import re
 import json
 import logging
-import google.generativeai as genai
+from typing import Dict, Any, Optional, List
 from dotenv import load_dotenv
-from typing import Dict, Any, Optional
+from google import genai
+from google.genai import types
+from google.genai.errors import APIError
 
 logger = logging.getLogger(__name__)
 
+# Ensure environment variables are loaded
+load_dotenv(override=True)
+
 def get_api_key() -> Optional[str]:
     """
-    Dynamically loads environment variables and retrieves the Gemini API key.
+    Retrieves Gemini API key ONLY from environment variables (.env).
+    Never hardcodes or prints keys.
     """
     load_dotenv(override=True)
-    return os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if key and key.strip():
+        return key.strip()
+    return None
 
-def ensure_gemini_configured() -> Optional[str]:
+def get_genai_client() -> Optional[genai.Client]:
     """
-    Ensures google-generativeai is configured with a valid API key if available.
-    Returns the API key or None.
+    Initializes and returns a Google GenAI Client instance if GEMINI_API_KEY is configured.
     """
     key = get_api_key()
-    if key:
-        try:
-            genai.configure(api_key=key)
-        except Exception as e:
-            logger.error(f"Failed to configure genai: {e}")
-    return key
+    if not key:
+        return None
+    try:
+        return genai.Client(api_key=key)
+    except Exception as e:
+        logger.error(f"Failed to initialize GenAI client safely: {type(e).__name__}")
+        return None
 
 def test_gemini_connection() -> Dict[str, Any]:
     """
-    Performs a small, fast request to test Gemini API key validity before heavy processing.
+    Health check distinguishing 3 states:
+    1. UNCONFIGURED: GEMINI_API_KEY missing from environment
+    2. FAILED: Configured key exists, but API request failed
+    3. HEALTHY: API connected and responding successfully
     """
-    key = ensure_gemini_configured()
+    key = get_api_key()
     if not key:
         return {
+            "status": "UNCONFIGURED",
             "success": False,
-            "error": "Gemini API key is not configured. Please add GEMINI_API_KEY to your .env file."
+            "error": "Gemini API key is not configured in .env environment.",
+            "model": None
         }
-    
-    models_to_try = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
+
+    client = get_genai_client()
+    if not client:
+        return {
+            "status": "FAILED",
+            "success": False,
+            "error": "Failed to initialize Gemini API client.",
+            "model": None
+        }
+
+    # Try modern available models in priority order
+    candidate_models = ["gemini-3.6-flash", "gemini-3.1-pro-preview", "gemini-2.5-flash"]
     last_err = ""
-    for model_name in models_to_try:
+
+    for model_name in candidate_models:
         try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content("Ping")
+            response = client.models.generate_content(
+                model=model_name,
+                contents="Ping",
+                config=types.GenerateContentConfig(temperature=0.0)
+            )
             if response and response.text:
-                return {"success": True, "model": model_name, "error": None}
-        except Exception as e:
-            last_err = str(e)
+                return {
+                    "status": "HEALTHY",
+                    "success": True,
+                    "error": None,
+                    "model": model_name
+                }
+        except APIError as e:
+            last_err = f"API error ({e.code}): {e.message}"
             continue
-            
+        except Exception as e:
+            last_err = f"Connection failed: {str(e)}"
+            continue
+
     return {
+        "status": "FAILED",
         "success": False,
-        "error": f"Failed to connect to Gemini API: {last_err}"
+        "error": f"Gemini request failed: {last_err}",
+        "model": None
     }
 
-def build_drhp_context(text: str, max_chars: int = 60000) -> str:
+def build_drhp_context(text: str, max_chars: int = 70000) -> str:
     """
-    Extracts relevant sections from large DRHP documents (1M+ chars) by combining 
-    the opening overview, key section matches (Financials, Risks, Objects, Promoters), 
-    and document summary snippets instead of naive top truncation.
+    Extracts high-priority sections from large DRHP documents (1M+ chars) by combining:
+    1. Opening cover & executive summary
+    2. Specific matching sections (Financials, Risks, Objects, Promoters, Legal, Competitors)
+    3. Concluding disclosures
     """
     if not text:
         return ""
-        
+
     if len(text) <= max_chars:
         return text
-        
-    # Standard DRHP section headers to look for
+
     keywords = [
         "OBJECTS OF THE OFFER",
         "USE OF PROCEEDS",
@@ -76,314 +114,340 @@ def build_drhp_context(text: str, max_chars: int = 60000) -> str:
         "OUR BUSINESS",
         "FINANCIAL INFORMATION",
         "FINANCIAL STATEMENTS",
-        "OUR PROMOTERS AND GROUP COMPANIES",
+        "OUR PROMOTERS",
         "CAPITAL STRUCTURE",
         "LEGAL AND OTHER INFORMATION",
-        "INDUSTRY OVERVIEW",
-        "SUMMARY OF FINANCIAL INFORMATION"
+        "RELATED PARTY TRANSACTIONS",
+        "PENDING LITIGATION",
+        "COMPETITION",
+        "INDUSTRY OVERVIEW"
     ]
-    
+
     extracted_chunks = []
-    
-    # 1. Include first 15,000 chars (Executive Summary / Intro / Cover)
+
+    # 1. Executive summary / Intro (First 18,000 chars)
     extracted_chunks.append("--- BEGIN SECTION: COVER & EXECUTIVE SUMMARY ---")
-    extracted_chunks.append(text[:15000])
-    
-    # 2. Search for keyword section occurrences throughout the document
+    extracted_chunks.append(text[:18000])
+
+    # 2. Key section keyword extractions
     text_lower = text.lower()
-    chars_per_keyword = 5000
-    
+    chars_per_section = 5000
+
     for kw in keywords:
         pos = text_lower.find(kw.lower())
-        if pos != -1 and pos > 15000:
+        if pos != -1 and pos > 18000:
             extracted_chunks.append(f"\n--- BEGIN SECTION: {kw} ---")
-            snippet = text[pos : pos + chars_per_keyword]
+            snippet = text[pos : pos + chars_per_section]
             extracted_chunks.append(snippet)
-            
-    # 3. Include last 10,000 chars (Financial Notes & Legal disclosures often at end)
-    if len(text) > 25000:
-        extracted_chunks.append("\n--- BEGIN SECTION: FINANCIAL NOTES & CONCLUDING DISCLOSURES ---")
-        extracted_chunks.append(text[-10000:])
-        
+
+    # 3. Concluding section (Financial notes & disclosures)
+    if len(text) > 30000:
+        extracted_chunks.append("\n--- BEGIN SECTION: FINANCIAL DISCLOSURES & CONCLUDING DISCLOSURES ---")
+        extracted_chunks.append(text[-12000:])
+
     combined = "\n\n".join(extracted_chunks)
-    
-    # Cap at max_chars to ensure safe token limit
     if len(combined) > max_chars:
         return combined[:max_chars]
     return combined
 
+def validate_and_normalize_structured_json(data: Any) -> Optional[Dict[str, Any]]:
+    """
+    Validates that parsed JSON strictly conforms to the required DRHP schema.
+    Returns None if core analysis content is unparseable or missing (STRICT NO-FAKE-FALLBACK POLICY).
+    """
+    if not isinstance(data, dict):
+        return None
+
+    def get_str(key: str, default: str = "") -> str:
+        val = data.get(key)
+        return str(val).strip() if val is not None and str(val).strip() else default
+
+    def get_list(key: str) -> List[str]:
+        val = data.get(key)
+        if isinstance(val, list):
+            return [str(item).strip() for item in val if item is not None and str(item).strip()]
+        return []
+
+    def get_optional_float(key: str) -> Optional[float]:
+        try:
+            val = data.get(key)
+            if val is not None and str(val).strip() != "":
+                return float(val)
+        except (ValueError, TypeError):
+            pass
+        return None
+
+    company_name = get_str("company_name", "Specified Entity in DRHP")
+    industry = get_str("industry", "Not Specified")
+    business_summary = get_str("business_summary")
+    business_model = get_str("business_model")
+
+    # If core summary fields are totally empty, validation fails cleanly
+    if not business_summary and not business_model:
+        return None
+
+    # Validate ipo_details (supports dict or list)
+    ipo_details_raw = data.get("ipo_details")
+    if isinstance(ipo_details_raw, dict):
+        ipo_details = [f"{k}: {v}" for k, v in ipo_details_raw.items() if v]
+    elif isinstance(ipo_details_raw, list):
+        ipo_details = [str(x) for x in ipo_details_raw if x]
+    else:
+        ipo_details = []
+
+    # Validate score breakdown
+    sb_raw = data.get("score_breakdown", {})
+    score_breakdown = {}
+    if isinstance(sb_raw, dict):
+        for k in ["financial_health", "growth_potential", "business_quality", "industry_position", "risk_profile"]:
+            try:
+                v = sb_raw.get(k)
+                score_breakdown[k] = round(float(v), 1) if v is not None else None
+            except (ValueError, TypeError):
+                score_breakdown[k] = None
+
+    # Investment score handling (NO fake 50.0 default!)
+    inv_score = get_optional_float("investment_score")
+    if inv_score is None:
+        # If components exist, sum them up
+        valid_sb = [v for v in score_breakdown.values() if v is not None]
+        if valid_sb:
+            inv_score = round(sum(valid_sb), 1)
+
+    if inv_score is not None:
+        inv_score = round(max(0.0, min(100.0, inv_score)), 1)
+
+    # Risk level normalization
+    risk_level_raw = get_str("risk_level")
+    if risk_level_raw.capitalize() in ["Low", "Moderate", "High"]:
+        risk_level = risk_level_raw.capitalize()
+    elif risk_level_raw:
+        risk_level = risk_level_raw
+    else:
+        risk_level = "N/A"
+
+    # Recommendation normalization
+    recommendation = get_str("recommendation") or "Analysis unavailable"
+
+    # Validate red flags list with grounded evidence and categories
+    red_flags_raw = data.get("red_flags", [])
+    normalized_red_flags = []
+    if isinstance(red_flags_raw, list):
+        for rf in red_flags_raw:
+            if isinstance(rf, dict):
+                title = str(rf.get("title") or rf.get("risk_title") or "Identified Risk").strip()
+                sev = str(rf.get("severity") or "Medium").capitalize()
+                if sev not in ["High", "Medium", "Low"]:
+                    sev = "Medium"
+                cat = str(rf.get("category") or "Operational Risk").strip()
+                explanation = str(rf.get("explanation") or rf.get("details") or "").strip()
+                evidence = str(rf.get("evidence") or rf.get("drhp_evidence") or explanation or "Document disclosure.").strip()
+
+                normalized_red_flags.append({
+                    "title": title,
+                    "severity": sev,
+                    "category": cat,
+                    "explanation": explanation or evidence,
+                    "evidence": evidence
+                })
+
+    confidence = get_optional_float("confidence")
+    if confidence is not None:
+        confidence = round(max(0.0, min(100.0, confidence)), 1)
+
+    return {
+        "company_name": company_name,
+        "industry": industry,
+        "business_summary": business_summary or "Information not available in DRHP sections.",
+        "business_model": business_model or "Information not available in DRHP sections.",
+        "products_services": get_list("products_services"),
+        "revenue_sources": get_list("revenue_sources"),
+        "financial_highlights": get_list("financial_highlights"),
+        "strengths": get_list("strengths"),
+        "risks": get_list("risks"),
+        "red_flags": normalized_red_flags,
+        "growth_opportunities": get_list("growth_opportunities"),
+        "competitors": get_list("competitors"),
+        "ipo_details": ipo_details,
+        "use_of_proceeds": get_list("use_of_proceeds"),
+        "investment_score": inv_score,  # Float or None (NO fake default!)
+        "score_breakdown": score_breakdown,
+        "risk_level": risk_level,      # "Low" | "Moderate" | "High" | "N/A"
+        "recommendation": recommendation, # String or "Analysis unavailable"
+        "recommendation_reason": get_str("recommendation_reason", "Analysis based on provided DRHP sections."),
+        "confidence": confidence       # Float or None
+    }
+
 def analyze_drhp_structured(text: str) -> Dict[str, Any]:
     """
-    Analyzes DRHP text using Gemini and returns a validated structured dictionary 
-    conforming to the required IPO Intelligence JSON schema.
+    Performs forensic AI analysis on DRHP text using Gemini and returns a validated structured dictionary.
+    Returns success: False and data: None if API is unconfigured or analysis fails.
     """
-    key = ensure_gemini_configured()
-    if not key:
+    health = test_gemini_connection()
+    if not health["success"]:
         return {
             "success": False,
-            "error": "Gemini API key is not configured. Please add GEMINI_API_KEY to your .env file.",
+            "error": health["error"],
             "data": None
         }
-        
-    drhp_context = build_drhp_context(text, max_chars=60000)
+
+    client = get_genai_client()
+    if not client:
+        return {
+            "success": False,
+            "error": "Gemini API client unavailable.",
+            "data": None
+        }
+
+    drhp_context = build_drhp_context(text, max_chars=70000)
     if not drhp_context.strip():
         return {
             "success": False,
             "error": "The DRHP text is empty or could not be extracted.",
             "data": None
         }
-        
+
     prompt = f"""
 You are a senior equity research analyst and forensic risk auditor reviewing a Draft Red Herring Prospectus (DRHP).
 
-Analyze the provided DRHP text and extract structured financial insights. Respond ONLY with a valid JSON object matching the EXACT key structure below. Do not wrap in conversational text.
+Analyze the provided DRHP document sections and return a structured JSON response matching the EXACT schema below.
 
-Required JSON Schema:
+JSON Schema:
 {{
-  "company_name": "String (Full legal company name)",
-  "industry": "String (Industry / Sector)",
-  "business_summary": "String (Detailed summary of what the company does)",
-  "business_model": "String (How the company generates revenue and unit economics)",
-  "products_services": ["String list of major products/services"],
-  "revenue_sources": ["String list of primary revenue streams"],
-  "financial_highlights": ["String list of key metrics e.g. Revenue, EBITDA, PAT, Debt, Margins"],
-  "growth_opportunities": ["String list of growth catalysts"],
-  "strengths": ["String list of key competitive advantages/moats"],
-  "risks": ["String list of operational and market risks"],
+  "company_name": "Full legal company name",
+  "industry": "Industry or Sector",
+  "business_summary": "Comprehensive overview of company business operations",
+  "business_model": "Revenue generation model and unit economics",
+  "products_services": ["List of main products or services offered"],
+  "revenue_sources": ["List of primary revenue streams"],
+  "financial_highlights": ["List of key financial metrics (Revenue, Profit, EBITDA, Debt, Assets, Margins)"],
+  "strengths": ["List of competitive advantages / moats"],
+  "risks": ["List of general business & industry risks"],
   "red_flags": [
     {{
-      "title": "String (Short risk title)",
+      "title": "Short title of severe risk/red flag",
       "severity": "High" | "Medium" | "Low",
-      "evidence": "String (Grounded evidence with specific details/figures from DRHP)",
-      "category": "Debt" | "Legal" | "Concentration" | "Governance" | "Valuation" | "Operational" | "Regulatory"
+      "category": "High debt" | "Negative cash flow" | "Continuous losses" | "Revenue concentration" | "Customer concentration" | "Supplier concentration" | "Promoter selling" | "Promoter concerns" | "Related-party transactions" | "Pending litigation" | "Regulatory issues" | "Auditor qualifications" | "Contingent liabilities" | "Corporate governance concerns" | "Industry-specific risks",
+      "explanation": "Detailed explanation of why this is a red flag",
+      "evidence": "Specific quoted evidence or quantitative figures from the DRHP"
     }}
   ],
-  "competitors": ["String list of peer companies"],
-  "ipo_details": ["String list of IPO details e.g. Fresh Issue size, OFS size, Price Band if mentioned"],
-  "use_of_proceeds": ["String list of objects of the issue"],
-  "investment_score": 0.0 to 100.0 (Numeric score based transparently on Financials, Growth, Business Quality, Industry, Risk),
+  "growth_opportunities": ["List of business growth catalysts"],
+  "competitors": ["List of key market competitors / peers"],
+  "ipo_details": ["Fresh Issue size, OFS size, Price Band, Listing details"],
+  "use_of_proceeds": ["Specific objects of the offer / deployment of funds"],
+  "investment_score": 0.0 to 100.0 (Sum of breakdown scores out of 100),
   "score_breakdown": {{
-    "financial_health": 0 to 20,
-    "growth_potential": 0 to 20,
-    "business_quality": 0 to 20,
-    "industry_position": 0 to 20,
-    "risk_profile": 0 to 20
+    "financial_health": 0.0 to 20.0,
+    "growth_potential": 0.0 to 20.0,
+    "business_quality": 0.0 to 20.0,
+    "industry_position": 0.0 to 20.0,
+    "risk_profile": 0.0 to 20.0
   }},
   "risk_level": "Low" | "Moderate" | "High",
-  "recommendation": "Strong Positive" | "Positive" | "Neutral" | "Cautious" | "Negative",
-  "recommendation_reason": "String (Detailed reasoning for the investment recommendation)",
-  "confidence": 0 to 100 (Numeric percentage confidence based on data completeness)
+  "recommendation": "SUBSCRIBE" | "WATCH" | "AVOID",
+  "recommendation_reason": "Detailed rationale for the recommendation",
+  "confidence": 0.0 to 100.0 (Confidence score based on completeness of DRHP disclosures)
 }}
 
-Important Guidelines:
-1. Base all facts, numbers, and red flags strictly on evidence present in the DRHP text.
-2. If specific financial figures or details are unavailable in the text, explicitly state "Information not available in provided DRHP sections" rather than inventing data.
-3. Compute the investment_score transparently as the sum of score_breakdown components (out of 100).
-4. Ensure red_flags list contains items with title, severity, evidence, and category.
+Critical Guidelines:
+1. Base all metrics, red flags, and facts strictly on evidence present in the DRHP text.
+2. Every red flag MUST include specific evidence grounded in the text.
+3. Output strictly valid JSON. Do not wrap in conversational markdown commentary.
 
-DRHP Document Content:
+DRHP Document Text:
 {drhp_context}
 """
 
-    models_to_try = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
+    candidate_models = ["gemini-3.6-flash", "gemini-3.1-pro-preview", "gemini-2.5-flash"]
     last_error = ""
 
-    for model_name in models_to_try:
+    for model_name in candidate_models:
         try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(
-                prompt,
-                generation_config={"temperature": 0.2}
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    response_mime_type="application/json"
+                )
             )
-            
+
+            if not response or not response.text:
+                continue
+
             raw_text = response.text.strip()
-            
-            # Clean Markdown code fences if present
             if raw_text.startswith("```"):
                 raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
                 raw_text = re.sub(r"\s*```$", "", raw_text)
                 raw_text = raw_text.strip()
 
-            data = json.loads(raw_text)
-            
-            # Validate core fields and ensure defaults
-            validated = validate_and_normalize_structured_json(data)
-            return {
-                "success": True,
-                "error": None,
-                "data": validated
-            }
-            
+            parsed_json = json.loads(raw_text)
+            validated_data = validate_and_normalize_structured_json(parsed_json)
+
+            if validated_data is not None:
+                return {
+                    "success": True,
+                    "error": None,
+                    "data": validated_data
+                }
+            else:
+                last_error = "JSON output failed structural validation against required DRHP schema."
+                logger.warning(f"Validation failed for model {model_name}")
+
         except json.JSONDecodeError as e:
-            last_error = f"Failed to parse JSON response from model {model_name}: {str(e)}"
+            last_error = f"JSON decode error from {model_name}: {str(e)}"
             logger.warning(last_error)
-            # If model returned semi-structured text, try fallback recovery
-            continue
+        except APIError as e:
+            last_error = f"Gemini API error ({model_name}): {e.message}"
+            logger.warning(last_error)
         except Exception as e:
-            last_error = f"Gemini API error ({model_name}): {str(e)}"
+            last_error = f"Error with model {model_name}: {str(e)}"
             logger.warning(last_error)
-            continue
 
     return {
         "success": False,
-        "error": f"Failed to perform Gemini analysis: {last_error}",
+        "error": f"AI Analysis failed: {last_error}",
         "data": None
     }
 
-def validate_and_normalize_structured_json(data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Ensures all expected keys exist in the dictionary with valid types.
-    """
-    if not isinstance(data, dict):
-        data = {}
-
-    def get_str(key: str, default: str = "Not specified") -> str:
-        val = data.get(key)
-        return str(val) if val is not None and str(val).strip() else default
-
-    def get_list(key: str) -> list:
-        val = data.get(key)
-        if isinstance(val, list):
-            return [str(item) for item in val if item is not None]
-        return []
-
-    def get_float(key: str, default: float = 0.0) -> float:
-        try:
-            val = data.get(key)
-            if val is not None:
-                return float(val)
-        except (ValueError, TypeError):
-            pass
-        return default
-
-    # Normalize score breakdown
-    raw_breakdown = data.get("score_breakdown", {})
-    if not isinstance(raw_breakdown, dict):
-        raw_breakdown = {}
-        
-    breakdown = {
-        "financial_health": float(raw_breakdown.get("financial_health", 10.0)),
-        "growth_potential": float(raw_breakdown.get("growth_potential", 10.0)),
-        "business_quality": float(raw_breakdown.get("business_quality", 10.0)),
-        "industry_position": float(raw_breakdown.get("industry_position", 10.0)),
-        "risk_profile": float(raw_breakdown.get("risk_profile", 10.0))
-    }
-
-    calculated_score = sum(breakdown.values())
-    raw_score = get_float("investment_score", calculated_score)
-    inv_score = round(max(0.0, min(100.0, raw_score)), 1)
-
-    # Risk level normalization
-    risk_level = get_str("risk_level", "Moderate")
-    if risk_level.capitalize() not in ["Low", "Moderate", "High"]:
-        risk_level = "Moderate"
-
-    # Recommendation normalization
-    recommendation = get_str("recommendation", "Neutral")
-
-    # Normalize red flags list
-    raw_red_flags = data.get("red_flags", [])
-    normalized_red_flags = []
-    if isinstance(raw_red_flags, list):
-        for rf in raw_red_flags:
-            if isinstance(rf, dict):
-                normalized_red_flags.append({
-                    "title": str(rf.get("title", "Risk Factor")),
-                    "severity": str(rf.get("severity", "Medium")).capitalize(),
-                    "evidence": str(rf.get("evidence", "Mentioned in DRHP disclosures.")),
-                    "category": str(rf.get("category", "Operational"))
-                })
-            elif isinstance(rf, str):
-                normalized_red_flags.append({
-                    "title": "Identified Risk",
-                    "severity": "Medium",
-                    "evidence": rf,
-                    "category": "Operational"
-                })
-
-    return {
-        "company_name": get_str("company_name", "Unknown Company"),
-        "industry": get_str("industry", "Not Specified"),
-        "business_summary": get_str("business_summary", "Summary not available."),
-        "business_model": get_str("business_model", "Business model details not provided."),
-        "products_services": get_list("products_services"),
-        "revenue_sources": get_list("revenue_sources"),
-        "financial_highlights": get_list("financial_highlights"),
-        "growth_opportunities": get_list("growth_opportunities"),
-        "strengths": get_list("strengths"),
-        "risks": get_list("risks"),
-        "red_flags": normalized_red_flags,
-        "competitors": get_list("competitors"),
-        "ipo_details": get_list("ipo_details"),
-        "use_of_proceeds": get_list("use_of_proceeds"),
-        "investment_score": inv_score,
-        "score_breakdown": breakdown,
-        "risk_level": risk_level,
-        "recommendation": recommendation,
-        "recommendation_reason": get_str("recommendation_reason", "Analysis completed based on available DRHP content."),
-        "confidence": round(max(0.0, min(100.0, get_float("confidence", 75.0))), 1)
-    }
-
 # ==============================================================================
-# Backward Compatibility Wrappers
+# Helper Compatibility Wrappers
 # ==============================================================================
 
 def generate_summary(text: str) -> str:
-    """Legacy helper function returning Markdown summary string."""
     res = analyze_drhp_structured(text)
-    if not res["success"]:
-        return res["error"]
-    
+    if not res["success"] or not res["data"]:
+        return res.get("error") or "AI analysis unavailable."
     d = res["data"]
-    lines = [
-        f"### {d['company_name']} ({d['industry']})",
-        f"**Business Summary**: {d['business_summary']}\n",
-        f"**Business Model**: {d['business_model']}\n",
-        "#### Key Products & Services",
-    ]
-    lines.extend([f"- {p}" for p in d["products_services"]] or ["- Information not available"])
-    lines.append("\n#### Financial Highlights")
-    lines.extend([f"- {f}" for f in d["financial_highlights"]] or ["- Information not available"])
-    lines.append("\n#### Objects of the Offer / Use of Proceeds")
-    lines.extend([f"- {u}" for u in d["use_of_proceeds"]] or ["- Information not available"])
-    
-    return "\n".join(lines)
+    return f"### {d['company_name']} ({d['industry']})\n\n**Business Summary**: {d['business_summary']}\n\n**Business Model**: {d['business_model']}"
 
 def generate_red_flags(text: str) -> str:
-    """Legacy helper function returning Markdown red flags string."""
     res = analyze_drhp_structured(text)
-    if not res["success"]:
-        return res["error"]
-        
+    if not res["success"] or not res["data"]:
+        return res.get("error") or "AI analysis unavailable."
     flags = res["data"].get("red_flags", [])
     if not flags:
-        return "No major critical red flags identified in the extracted sections."
-        
+        return "No major critical red flags identified in extracted DRHP sections."
     out = ["### ⚠️ Identified Risk Factors & Red Flags\n"]
     for idx, rf in enumerate(flags, 1):
-        sev = rf.get("severity", "Medium")
-        badge = "🔴 High" if sev == "High" else ("🟡 Medium" if sev == "Medium" else "🔵 Low")
-        out.append(f"**{idx}. {rf['title']}** [{badge}] ({rf.get('category', 'General')})")
-        out.append(f"- **Evidence**: {rf['evidence']}\n")
-        
+        out.append(f"**{idx}. {rf['title']}** [{rf['severity']}] ({rf['category']})\n- **Evidence**: {rf['evidence']}\n")
     return "\n".join(out)
 
 def generate_ipo_score(text: str) -> Optional[float]:
-    """
-    Evaluates IPO metrics and returns numeric score between 0 and 100.
-    Returns None if Gemini is unconfigured or analysis fails (no fake scores!).
-    """
     res = analyze_drhp_structured(text)
-    if not res["success"]:
+    if not res["success"] or not res["data"]:
         return None
     return res["data"].get("investment_score")
 
 def generate_recommendation(text: str) -> str:
-    """Legacy helper returning recommendation markdown."""
     res = analyze_drhp_structured(text)
-    if not res["success"]:
-        return res["error"]
-        
+    if not res["success"] or not res["data"]:
+        return "Analysis unavailable"
     d = res["data"]
-    return f"**{d['recommendation'].upper()}**: {d['recommendation_reason']}"
+    return f"**{d['recommendation']}**: {d['recommendation_reason']}"
 
+if __name__ == "__main__":
+    print("Testing gemini_service.py health check...")
+    hc = test_gemini_connection()
+    print("Health check result:", hc)
