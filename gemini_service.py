@@ -13,6 +13,9 @@ logger = logging.getLogger(__name__)
 # Ensure environment variables are loaded
 load_dotenv(override=True)
 
+# Central Gemini Model Configuration
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+
 def get_api_key() -> Optional[str]:
     """
     Retrieves Gemini API key ONLY from environment variables (.env).
@@ -62,8 +65,8 @@ def test_gemini_connection() -> Dict[str, Any]:
             "model": None
         }
 
-    # Try modern available models in priority order
-    candidate_models = ["gemini-3.6-flash", "gemini-3.1-pro-preview", "gemini-2.5-flash"]
+    # Use central GEMINI_MODEL configuration
+    candidate_models = [GEMINI_MODEL]
     last_err = ""
 
     for model_name in candidate_models:
@@ -150,11 +153,14 @@ def build_drhp_context(text: str, max_chars: int = 70000) -> str:
         return combined[:max_chars]
     return combined
 
-def validate_and_normalize_structured_json(data: Any) -> Optional[Dict[str, Any]]:
+def validate_and_normalize_structured_json(data: Any, pages: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
     """
-    Validates that parsed JSON strictly conforms to the required DRHP schema.
-    Returns None if core analysis content is unparseable or missing (STRICT NO-FAKE-FALLBACK POLICY).
+    Validates and normalizes JSON parsed from Gemini response.
+    Integrates Python deterministic scoring engine and page evidence locator.
     """
+    from pdf_processor import find_source_page
+    from scoring_engine import calculate_ipo_score
+
     if not isinstance(data, dict):
         return None
 
@@ -168,25 +174,16 @@ def validate_and_normalize_structured_json(data: Any) -> Optional[Dict[str, Any]
             return [str(item).strip() for item in val if item is not None and str(item).strip()]
         return []
 
-    def get_optional_float(key: str) -> Optional[float]:
-        try:
-            val = data.get(key)
-            if val is not None and str(val).strip() != "":
-                return float(val)
-        except (ValueError, TypeError):
-            pass
-        return None
-
     company_name = get_str("company_name", "Specified Entity in DRHP")
     industry = get_str("industry", "Not Specified")
     business_summary = get_str("business_summary")
     business_model = get_str("business_model")
 
-    # If core summary fields are totally empty, validation fails cleanly
+    # Strict check: If core summary fields are completely missing, fail gracefully
     if not business_summary and not business_model:
         return None
 
-    # Validate ipo_details (supports dict or list)
+    # IPO details list
     ipo_details_raw = data.get("ipo_details")
     if isinstance(ipo_details_raw, dict):
         ipo_details = [f"{k}: {v}" for k, v in ipo_details_raw.items() if v]
@@ -195,65 +192,187 @@ def validate_and_normalize_structured_json(data: Any) -> Optional[Dict[str, Any]
     else:
         ipo_details = []
 
-    # Validate score breakdown
-    sb_raw = data.get("score_breakdown", {})
-    score_breakdown = {}
-    if isinstance(sb_raw, dict):
-        for k in ["financial_health", "growth_potential", "business_quality", "industry_position", "risk_profile"]:
-            try:
-                v = sb_raw.get(k)
-                score_breakdown[k] = round(float(v), 1) if v is not None else None
-            except (ValueError, TypeError):
-                score_breakdown[k] = None
+    # Process Financial Facts & Multi-Period Disclosures
+    from ratio_engine import (
+        normalize_multi_period_facts,
+        calculate_financial_ratios,
+        analyze_financial_trends,
+        generate_financial_health_interpretations
+    )
 
-    # Investment score handling (NO fake 50.0 default!)
-    inv_score = get_optional_float("investment_score")
-    if inv_score is None:
-        # If components exist, sum them up
-        valid_sb = [v for v in score_breakdown.values() if v is not None]
-        if valid_sb:
-            inv_score = round(sum(valid_sb), 1)
+    raw_facts = data.get("financial_facts", [])
+    normalized_facts = []
+    if isinstance(raw_facts, list):
+        for f in raw_facts:
+            if isinstance(f, dict):
+                metric = get_str_val(f, "metric")
+                unit = get_str_val(f, "unit") or None
+                
+                # Check for multi-year periods list
+                periods_raw = f.get("periods")
+                periods = []
+                if isinstance(periods_raw, list) and len(periods_raw) > 0:
+                    for p in periods_raw:
+                        if isinstance(p, dict):
+                            yr = str(p.get("year") or p.get("period") or "").strip()
+                            v_val = p.get("value")
+                            v_str = str(v_val).strip() if v_val is not None and str(v_val).strip() not in ["null", "None", "N/A", ""] else None
+                            e_text = get_str_val(p, "evidence_text") or get_str_val(p, "evidence")
+                            p_num = p.get("source_page") or p.get("page") or f.get("source_page")
+                            
+                            if p_num is not None:
+                                try:
+                                    p_num = int(p_num)
+                                except (ValueError, TypeError):
+                                    p_num = None
+                            if p_num is None and pages and e_text:
+                                p_num = find_source_page(pages, e_text)
 
-    if inv_score is not None:
-        inv_score = round(max(0.0, min(100.0, inv_score)), 1)
+                            periods.append({
+                                "year": yr or "FY",
+                                "value": v_str,
+                                "source_page": p_num,
+                                "evidence_text": e_text or None
+                            })
 
-    # Risk level normalization
-    risk_level_raw = get_str("risk_level")
-    if risk_level_raw.capitalize() in ["Low", "Moderate", "High"]:
-        risk_level = risk_level_raw.capitalize()
-    elif risk_level_raw:
-        risk_level = risk_level_raw
-    else:
-        risk_level = "N/A"
+                val = f.get("value")
+                val_str = str(val).strip() if val is not None and str(val).strip() not in ["null", "None", "N/A", ""] else None
+                evidence_text = get_str_val(f, "evidence_text") or get_str_val(f, "evidence")
+                page_num = f.get("source_page") or f.get("page")
 
-    # Recommendation normalization
-    recommendation = get_str("recommendation") or "Analysis unavailable"
+                if page_num is not None:
+                    try:
+                        page_num = int(page_num)
+                    except (ValueError, TypeError):
+                        page_num = None
 
-    # Validate red flags list with grounded evidence and categories
-    red_flags_raw = data.get("red_flags", [])
+                if page_num is None and pages and evidence_text:
+                    page_num = find_source_page(pages, evidence_text)
+
+                fact_obj = {
+                    "metric": metric or "Financial Metric",
+                    "value": val_str,
+                    "unit": unit,
+                    "period": get_str_val(f, "period") or None,
+                    "source_page": page_num,
+                    "evidence_text": evidence_text or ("Not available in document." if val_str is None and not periods else None)
+                }
+                if periods:
+                    fact_obj["periods"] = periods
+
+                normalized_facts.append(fact_obj)
+
+    # NORMALIZE MULTI-PERIOD FACTS & CALCULATE RATIOS IN PYTHON
+    norm_facts_map = normalize_multi_period_facts(normalized_facts)
+    calculated_ratios = calculate_financial_ratios(norm_facts_map)
+    financial_trends = analyze_financial_trends(norm_facts_map)
+    financial_interpretations = generate_financial_health_interpretations(calculated_ratios)
+
+    # Process Red Flags
+    raw_red_flags = data.get("red_flags", [])
     normalized_red_flags = []
-    if isinstance(red_flags_raw, list):
-        for rf in red_flags_raw:
+    if isinstance(raw_red_flags, list):
+        for rf in raw_red_flags:
             if isinstance(rf, dict):
                 title = str(rf.get("title") or rf.get("risk_title") or "Identified Risk").strip()
                 sev = str(rf.get("severity") or "Medium").capitalize()
                 if sev not in ["High", "Medium", "Low"]:
                     sev = "Medium"
                 cat = str(rf.get("category") or "Operational Risk").strip()
-                explanation = str(rf.get("explanation") or rf.get("details") or "").strip()
-                evidence = str(rf.get("evidence") or rf.get("drhp_evidence") or explanation or "Document disclosure.").strip()
+                explanation = str(rf.get("explanation") or rf.get("reason") or rf.get("details") or "").strip()
+
+                evidence_raw = rf.get("evidence")
+                p_num = None
+                e_text = ""
+
+                if isinstance(evidence_raw, dict):
+                    e_text = str(evidence_raw.get("text") or "").strip()
+                    p_num = evidence_raw.get("page")
+                elif isinstance(evidence_raw, str):
+                    e_text = evidence_raw.strip()
+
+                if p_num is not None:
+                    try:
+                        p_num = int(p_num)
+                    except (ValueError, TypeError):
+                        p_num = None
+
+                if p_num is None and pages and e_text:
+                    p_num = find_source_page(pages, e_text)
+
+                if p_num is None and pages and explanation:
+                    p_num = find_source_page(pages, explanation)
 
                 normalized_red_flags.append({
                     "title": title,
                     "severity": sev,
                     "category": cat,
-                    "explanation": explanation or evidence,
-                    "evidence": evidence
+                    "explanation": explanation or e_text or "Document disclosure.",
+                    "evidence": {
+                        "page": p_num,
+                        "text": e_text or explanation or "Referenced in DRHP."
+                    }
                 })
 
-    confidence = get_optional_float("confidence")
-    if confidence is not None:
-        confidence = round(max(0.0, min(100.0, confidence)), 1)
+    strengths = get_list("strengths")
+    growth_opps = get_list("growth_opportunities")
+
+    # DETERMINISTIC PYTHON SCORING ENGINE INTEGRATION (PASSED CALCULATED RATIOS)
+    score_res = calculate_ipo_score(
+        financial_facts=normalized_facts,
+        red_flags=normalized_red_flags,
+        ipo_details=ipo_details,
+        business_summary=business_summary,
+        strengths=strengths,
+        growth_opportunities=growth_opps,
+        ratios=calculated_ratios
+    )
+
+    inv_score = score_res["overall_score"]
+    cat_scores = score_res["category_scores"]
+
+    # Determine risk level deterministically from score and high/medium red flag counts
+    high_count = sum(1 for rf in normalized_red_flags if rf["severity"] == "High")
+    med_count = sum(1 for rf in normalized_red_flags if rf["severity"] == "Medium")
+
+    if high_count >= 2 or inv_score < 50.0:
+        risk_level = "High"
+    elif high_count == 1 or med_count >= 3 or inv_score < 70.0:
+        risk_level = "Moderate"
+    else:
+        risk_level = "Low"
+
+    # Recommendation normalization: Strong Positive | Positive | Neutral | Cautious | Negative
+    raw_rec = get_str("recommendation").upper()
+    if inv_score >= 80 and high_count == 0:
+        recommendation = "Strong Positive"
+    elif inv_score >= 68 and high_count == 0:
+        recommendation = "Positive"
+    elif inv_score >= 55 and high_count <= 1:
+        recommendation = "Neutral"
+    elif inv_score >= 40:
+        recommendation = "Cautious"
+    else:
+        recommendation = "Negative"
+
+    if "STRONG" in raw_rec and "POSITIVE" in raw_rec:
+        recommendation = "Strong Positive"
+    elif "POSITIVE" in raw_rec or "SUBSCRIBE" in raw_rec:
+        if recommendation not in ["Strong Positive", "Negative"]:
+            recommendation = "Positive"
+
+    rec_reason = get_str("recommendation_reason") or f"Score of {inv_score}/100 with {risk_level.lower()} risk profile."
+
+    # Strict confidence policy: return None if unverified or incomplete
+    raw_conf = data.get("confidence")
+    confidence = None
+    if raw_conf is not None:
+        try:
+            val_c = float(raw_conf)
+            if 0 <= val_c <= 100:
+                confidence = round(val_c, 1)
+        except (ValueError, TypeError):
+            confidence = None
 
     return {
         "company_name": company_name,
@@ -263,25 +382,41 @@ def validate_and_normalize_structured_json(data: Any) -> Optional[Dict[str, Any]
         "products_services": get_list("products_services"),
         "revenue_sources": get_list("revenue_sources"),
         "financial_highlights": get_list("financial_highlights"),
-        "strengths": get_list("strengths"),
+        "financial_facts": normalized_facts,
+        "normalized_fact_map": norm_facts_map,
+        "financial_ratios": calculated_ratios,
+        "financial_trends": financial_trends,
+        "financial_interpretations": financial_interpretations,
+        "strengths": strengths,
         "risks": get_list("risks"),
         "red_flags": normalized_red_flags,
-        "growth_opportunities": get_list("growth_opportunities"),
+        "growth_opportunities": growth_opps,
         "competitors": get_list("competitors"),
         "ipo_details": ipo_details,
         "use_of_proceeds": get_list("use_of_proceeds"),
-        "investment_score": inv_score,  # Float or None (NO fake default!)
-        "score_breakdown": score_breakdown,
-        "risk_level": risk_level,      # "Low" | "Moderate" | "High" | "N/A"
-        "recommendation": recommendation, # String or "Analysis unavailable"
-        "recommendation_reason": get_str("recommendation_reason", "Analysis based on provided DRHP sections."),
-        "confidence": confidence       # Float or None
+        "investment_score": inv_score,  # Deterministic score
+        "score_breakdown": {
+            "financial_health": cat_scores["financial_health"]["score"],
+            "business_quality": cat_scores["business_quality"]["score"],
+            "growth_potential": cat_scores["growth"]["score"],
+            "ipo_fundamentals": cat_scores["ipo_fundamentals"]["score"],
+            "risk_profile": cat_scores["risk"]["score"]
+        },
+        "category_scores": cat_scores,  # Full detailed reasons + sources
+        "risk_level": risk_level,      # "Low" | "Moderate" | "High"
+        "recommendation": recommendation, # "Strong Positive" | "Positive" | "Neutral" | "Cautious" | "Negative"
+        "recommendation_reason": rec_reason,
+        "confidence": confidence       # Float or None (Renders as N/A in UI when None)
     }
 
-def analyze_drhp_structured(text: str) -> Dict[str, Any]:
+def get_str_val(d: Dict[str, Any], k: str) -> str:
+    v = d.get(k)
+    return str(v).strip() if v is not None else ""
+
+def analyze_drhp_structured(text: str, pages: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """
     Performs forensic AI analysis on DRHP text using Gemini and returns a validated structured dictionary.
-    Returns success: False and data: None if API is unconfigured or analysis fails.
+    Integrates page awareness and deterministic scoring.
     """
     health = test_gemini_connection()
     if not health["success"]:
@@ -310,7 +445,7 @@ def analyze_drhp_structured(text: str) -> Dict[str, Any]:
     prompt = f"""
 You are a senior equity research analyst and forensic risk auditor reviewing a Draft Red Herring Prospectus (DRHP).
 
-Analyze the provided DRHP document sections and return a structured JSON response matching the EXACT schema below.
+Analyze the provided DRHP document text and extract financial facts, risk disclosures, and company details into JSON format matching the EXACT schema below.
 
 JSON Schema:
 {{
@@ -320,7 +455,17 @@ JSON Schema:
   "business_model": "Revenue generation model and unit economics",
   "products_services": ["List of main products or services offered"],
   "revenue_sources": ["List of primary revenue streams"],
-  "financial_highlights": ["List of key financial metrics (Revenue, Profit, EBITDA, Debt, Assets, Margins)"],
+  "financial_facts": [
+    {{
+      "metric": "Revenue" | "Revenue growth" | "EBITDA" | "Net profit" | "Profit growth" | "EPS" | "Total assets" | "Total liabilities" | "Total debt" | "Debt-to-equity" | "Operating cash flow" | "Free cash flow" | "Promoter shareholding" | "IPO size" | "Fresh issue" | "Offer for Sale" | "Use of proceeds" | "Customer concentration" | "Supplier concentration" | "Related-party transactions" | "Litigation" | "Contingent liabilities" | "Regulatory issues",
+      "value": "Exact value string or number, or null if unavailable in text",
+      "unit": "Cr / Lakhs / % / USD or null",
+      "period": "FY24 / FY23 or null",
+      "source_page": null,
+      "evidence_text": "Exact quote or figure sentence from DRHP, or null if unavailable"
+    }}
+  ],
+  "financial_highlights": ["List of key financial summary lines"],
   "strengths": ["List of competitive advantages / moats"],
   "risks": ["List of general business & industry risks"],
   "red_flags": [
@@ -329,37 +474,30 @@ JSON Schema:
       "severity": "High" | "Medium" | "Low",
       "category": "High debt" | "Negative cash flow" | "Continuous losses" | "Revenue concentration" | "Customer concentration" | "Supplier concentration" | "Promoter selling" | "Promoter concerns" | "Related-party transactions" | "Pending litigation" | "Regulatory issues" | "Auditor qualifications" | "Contingent liabilities" | "Corporate governance concerns" | "Industry-specific risks",
       "explanation": "Detailed explanation of why this is a red flag",
-      "evidence": "Specific quoted evidence or quantitative figures from the DRHP"
+      "evidence": "Specific quoted text or quantitative figures from the DRHP"
     }}
   ],
   "growth_opportunities": ["List of business growth catalysts"],
   "competitors": ["List of key market competitors / peers"],
   "ipo_details": ["Fresh Issue size, OFS size, Price Band, Listing details"],
   "use_of_proceeds": ["Specific objects of the offer / deployment of funds"],
-  "investment_score": 0.0 to 100.0 (Sum of breakdown scores out of 100),
-  "score_breakdown": {{
-    "financial_health": 0.0 to 20.0,
-    "growth_potential": 0.0 to 20.0,
-    "business_quality": 0.0 to 20.0,
-    "industry_position": 0.0 to 20.0,
-    "risk_profile": 0.0 to 20.0
-  }},
-  "risk_level": "Low" | "Moderate" | "High",
-  "recommendation": "SUBSCRIBE" | "WATCH" | "AVOID",
-  "recommendation_reason": "Detailed rationale for the recommendation",
-  "confidence": 0.0 to 100.0 (Confidence score based on completeness of DRHP disclosures)
+  "recommendation": "Strong Positive" | "Positive" | "Neutral" | "Cautious" | "Negative",
+  "recommendation_reason": "Detailed qualitative rationale for recommendation",
+  "confidence": null
 }}
 
 Critical Guidelines:
 1. Base all metrics, red flags, and facts strictly on evidence present in the DRHP text.
-2. Every red flag MUST include specific evidence grounded in the text.
-3. Output strictly valid JSON. Do not wrap in conversational markdown commentary.
+2. If a financial metric is unavailable in the document, set value = null and evidence_text = null. Do NOT invent missing values.
+3. Every red flag MUST include specific evidence quote from the DRHP. Do not flag generic risks unless evidence exists in text.
+4. Output strictly valid JSON without conversational markdown commentary.
 
 DRHP Document Text:
 {drhp_context}
 """
 
-    candidate_models = ["gemini-3.6-flash", "gemini-3.1-pro-preview", "gemini-2.5-flash"]
+    # Use central GEMINI_MODEL configuration
+    candidate_models = [GEMINI_MODEL]
     last_error = ""
 
     for model_name in candidate_models:
@@ -383,7 +521,7 @@ DRHP Document Text:
                 raw_text = raw_text.strip()
 
             parsed_json = json.loads(raw_text)
-            validated_data = validate_and_normalize_structured_json(parsed_json)
+            validated_data = validate_and_normalize_structured_json(parsed_json, pages=pages)
 
             if validated_data is not None:
                 return {
@@ -410,6 +548,7 @@ DRHP Document Text:
         "error": f"AI Analysis failed: {last_error}",
         "data": None
     }
+
 
 # ==============================================================================
 # Helper Compatibility Wrappers

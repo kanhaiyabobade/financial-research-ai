@@ -76,6 +76,59 @@ def init_database():
             cursor.execute(alter_stmt)
             print(f"Added missing column '{col_name}' to drhp_reports table.")
 
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS portfolio_holdings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol TEXT NOT NULL,
+        company_name TEXT,
+        quantity REAL NOT NULL,
+        avg_buy_price REAL NOT NULL DEFAULT 0,
+        notes TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    # Watchlist table for simple ticker tracking
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS watchlist (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol TEXT NOT NULL,
+        company_name TEXT,
+        notes TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    # Alerts table for simple price/percentage alerts
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS alerts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        symbol TEXT NOT NULL,
+        condition TEXT NOT NULL,
+        threshold REAL NOT NULL,
+        active INTEGER DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    # Non-destructive migrations for portfolio_holdings
+    cursor.execute("PRAGMA table_info(portfolio_holdings);")
+    ph_cols = [col[1] for col in cursor.fetchall()]
+
+    ph_migrations = {
+        "company_name": "ALTER TABLE portfolio_holdings ADD COLUMN company_name TEXT;",
+        "avg_buy_price": "ALTER TABLE portfolio_holdings ADD COLUMN avg_buy_price REAL NOT NULL DEFAULT 0;",
+        "notes": "ALTER TABLE portfolio_holdings ADD COLUMN notes TEXT;",
+        "updated_at": "ALTER TABLE portfolio_holdings ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;",
+    }
+
+    for col_name, alter_stmt in ph_migrations.items():
+        if col_name not in ph_cols:
+            cursor.execute(alter_stmt)
+            print(f"Added missing column '{col_name}' to portfolio_holdings table.")
+
     conn.commit()
     conn.close()
     print("Database initialized successfully.")

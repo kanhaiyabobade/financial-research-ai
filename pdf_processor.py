@@ -144,14 +144,20 @@ def extract_pdf_data(file_bytes: bytes, filename: str) -> Dict[str, Any]:
             }
 
         extracted_pages = []
+        page_records = []
         total_uncleaned_chars = 0
 
         for page_num in range(page_count):
             page = doc.load_page(page_num)
             page_text = page.get_text() or ""
             total_uncleaned_chars += len(page_text)
+            cleaned_p_text = clean_extracted_text(page_text)
             if page_text.strip():
                 extracted_pages.append(f"--- Page {page_num + 1} ---\n{page_text.strip()}")
+            page_records.append({
+                "page": page_num + 1,
+                "text": cleaned_p_text
+            })
 
         doc.close()
 
@@ -162,6 +168,7 @@ def extract_pdf_data(file_bytes: bytes, filename: str) -> Dict[str, Any]:
                 "page_count": page_count,
                 "char_count": 0,
                 "text": "",
+                "pages": [],
                 "sections": {},
                 "error": "The PDF document appears to be unreadable or scanned images without selectable text."
             }
@@ -177,6 +184,7 @@ def extract_pdf_data(file_bytes: bytes, filename: str) -> Dict[str, Any]:
             "page_count": page_count,
             "char_count": char_count,
             "text": cleaned_text,
+            "pages": page_records,
             "sections": sections,
             "error": None
         }
@@ -188,9 +196,45 @@ def extract_pdf_data(file_bytes: bytes, filename: str) -> Dict[str, Any]:
             "page_count": 0,
             "char_count": 0,
             "text": "",
+            "pages": [],
             "sections": {},
             "error": f"Failed to extract PDF data: {str(e)}"
         }
+
+def find_source_page(pages: List[Dict[str, Any]], query_text: str) -> Optional[int]:
+    """
+    Locates the exact 1-indexed page number containing query_text or significant words from it.
+    Returns None if no matching page is found.
+    """
+    if not pages or not query_text:
+        return None
+
+    cleaned_query = query_text.strip().lower()
+    if len(cleaned_query) < 4:
+        return None
+
+    # First attempt: direct substring search
+    for item in pages:
+        p_text = (item.get("text") or "").lower()
+        if cleaned_query in p_text:
+            return item.get("page")
+
+    # Second attempt: match distinct key phrase keywords (5+ chars)
+    words = [w for w in re.findall(r"\b[a-z0-9]{4,}\b", cleaned_query) if w not in {"with", "that", "this", "from", "have", "were", "been", "their"}]
+    if not words:
+        return None
+
+    best_page = None
+    best_matches = 0
+
+    for item in pages:
+        p_text = (item.get("text") or "").lower()
+        matches = sum(1 for w in words if w in p_text)
+        if matches > best_matches and matches >= max(1, len(words) // 2):
+            best_matches = matches
+            best_page = item.get("page")
+
+    return best_page
 
 if __name__ == "__main__":
     print("Self-testing pdf_processor.py...")
