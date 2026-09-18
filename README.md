@@ -1,4 +1,4 @@
-# Financial Research AI Dashboard
+# Financial Research AI- Dashboard
 
 A modern, interactive Streamlit application designed for equity analysis and research. It fetches stock market data from `yfinance`, displays key financial metrics, plots interactive historical performance charts, and retrieves the latest company-specific news coverage.
 
