@@ -1,49 +1,74 @@
-# Financial Research AI- Dashboard
+# Financial Research AI: Stock Analysis & IPO Intelligence
 
-A modern, interactive Streamlit application designed for equity analysis and research. It fetches stock market data from `yfinance`, displays key financial metrics, plots interactive historical performance charts, and retrieves the latest company-specific news coverage.
-
-## Features
-- **Key Equity Metrics**: Real-time lookup of stock price, market cap, and PE ratio.
-- **Indian Market Formatting**: Automatic conversion of market caps to Crores/Lakhs for NSE/BSE tickers.
-- **Interactive charts**: 1-year historical closing price trend lines using Plotly.
-- **News Integration**: Top 5 latest news articles regarding the searched firm.
-- **Database Initializer**: Easily sets up structured tables in SQLite for persistent tracking.
+A comprehensive, AI-powered financial research platform built with Streamlit. Designed for equity analysis, market monitoring, DRHP forensic analysis, portfolio tracking, and risk evaluation.
 
 ---
 
-## Getting Started
+## Key Features
+
+- **🏠 Market Overview**: Live tracking of key market benchmarks (NIFTY 50, SENSEX) and sentiment-aware market news.
+- **📈 Stock Dashboard**: Real-time equity metrics (price, market cap in Cr/Lakhs, P/E ratio), historical performance charts, and company news.
+- **🚀 IPO Intelligence**: DRHP PDF processing, automated ratio extraction, red flag detection, and AI investment scoring.
+- **💼 Portfolio Intelligence**: Track portfolio holdings, calculate gain/loss, asset allocation, and average buy price.
+- **🛡️ Risk Intelligence**: Portfolio concentration analysis, volatility assessment, and risk breakdown.
+- **🔔 Watchlist & Alerts**: Monitor watchlist tickers and configure custom price alerts.
+- **🧠 AI Research Assistant & Sector Intelligence**: Conversational financial Q&A and sector-specific insights.
+
+---
+
+## Technology Stack
+
+- **Frontend / Framework**: Streamlit
+- **Data & Charts**: Pandas, Plotly, yfinance
+- **AI & Sentiment**: Google GenAI SDK (`google-genai`), TextBlob
+- **Document Processing**: PyMuPDF (`fitz`)
+- **Database**: SQLite
+- **API & Utilities**: Requests, Python-Dotenv
+
+---
+
+## Local Setup
 
 ### 1. Install Dependencies
-Run pip to install the required libraries:
+
+Ensure Python 3.9+ is installed, then run:
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Configure Environment Variables
-The application uses NewsAPI to fetch the latest stock news. 
-1. Get a free API key at [NewsAPI.org](https://newsapi.org/).
-2. Copy the `.env.example` file to create a `.env` file:
-   ```bash
-   cp .env.example .env
-   ```
-3. Open the `.env` file and replace `your_api_key_here` with your actual NewsAPI key:
-   ```env
-   NEWS_API_KEY=your_actual_newsapi_key
-   ```
+### 2. Configure Environment Variables (Optional)
 
-### 3. Initialize the Database
-Before running the main app, initialize the local SQLite database (`finance.db`) by running:
-```bash
-python3 database.py
-```
-To verify the database tables were generated successfully, you can run:
-```bash
-python3 check_db.py
+Create a `.env` file in the project root or copy from `.env.example`:
+
+```env
+GEMINI_API_KEY=your_google_gemini_api_key
+NEWS_API_KEY=your_news_api_key
 ```
 
-### 4. Run the Streamlit Dashboard
-Launch the dashboard by running:
+*Note: If API keys are missing, non-AI features continue operating normally with safe warning notifications.*
+
+### 3. Run the Streamlit Application
+
+Start the application with:
+
 ```bash
 streamlit run app.py
 ```
-This will open the application in your default web browser (usually at `http://localhost:8501`).
+
+The app will launch at `http://localhost:8501`. Database tables in `finance.db` are initialized automatically on startup.
+
+---
+
+## Deployment to Streamlit Community Cloud
+
+1. Push your repository to GitHub.
+2. Log in to [Streamlit Community Cloud](https://share.streamlit.io/).
+3. Click **New app** and select your repository and branch.
+4. Set **Main file path** to `app.py`.
+5. Under **Advanced settings -> Secrets**, add your credentials:
+   ```toml
+   GEMINI_API_KEY = "your_key_here"
+   NEWS_API_KEY = "your_key_here"
+   ```
+6. Click **Deploy!**

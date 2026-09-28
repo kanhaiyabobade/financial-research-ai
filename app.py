@@ -6,6 +6,7 @@ import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from dotenv import load_dotenv
+import time
 
 # Load environment variables FIRST before importing any services
 load_dotenv(override=True)
@@ -17,8 +18,11 @@ from pdf_processor import extract_pdf_data
 from ipo_service import save_drhp_report, get_all_reports
 from gemini_service import (
     analyze_drhp_structured,
-    test_gemini_connection
+    test_gemini_connection,
+    get_genai_client,
+    GEMINI_MODEL,
 )
+from google.genai import types
 from red_flag_service import analyze_red_flags_structured
 from database import init_database
 from portfolio_service import (
@@ -174,22 +178,46 @@ def format_beta(val: Optional[float]) -> str:
 
 # Sidebar Navigation & System Health Check
 st.sidebar.markdown("<h2 style='font-family: \"Inter\", sans-serif; font-weight: 700;'>Navigation</h2>", unsafe_allow_html=True)
+# Helper to trigger a rerun across Streamlit versions
+def do_rerun():
+    try:
+        st.experimental_rerun()
+    except Exception:
+        # Fallback: update query params to force a rerun
+        try:
+            st.experimental_set_query_params(_refresh=int(time.time()))
+        except Exception:
+            pass
+
+nav_options = [
+    "🏠 Market Overview",
+    "📈 Stock Dashboard",
+    "🚀 IPO Intelligence",
+    "💼 Portfolio Intelligence",
+    "🛡️ Risk Intelligence",
+    "🔔 Watchlist",
+    "📰 Market Intelligence",
+    "🧠 AI Research Assistant",
+    "🏭 Sector Intelligence",
+    "📑 Research Reports",
+]
+
+# If some code requested navigation to Stock Dashboard, honor it before creating widget
+initial_index = 2
+if st.session_state.get("navigate_to_stock"):
+    try:
+        initial_index = nav_options.index("📈 Stock Dashboard")
+    except Exception:
+        initial_index = 2
+    # clear flag so subsequent loads behave normally
+    st.session_state.pop("navigate_to_stock", None)
+
 page = st.sidebar.radio(
     "Select Module:",
-    [
-        "🏠 Market Overview",
-        "📈 Stock Dashboard",
-        "🚀 IPO Intelligence",
-        "💼 Portfolio Intelligence",
-        "🛡️ Risk Intelligence",
-        "🔔 Watchlist",
-        "📰 Market Intelligence",
-        "🧠 AI Research Assistant",
-        "🏭 Sector Intelligence",
-        "📑 Research Reports",
-    ],
-    index=2,
-    label_visibility="collapsed"
+    nav_options,
+    index=initial_index,
+    label_visibility="collapsed",
+    key="main_nav"
 )
 
 st.sidebar.markdown("---")
@@ -961,7 +989,7 @@ elif page == "💼 Portfolio Intelligence":
                     )
                     if result_id:
                         st.success(f"✅ Added {new_symbol} (×{new_qty:g} shares @ {new_price:.2f}) to portfolio!")
-                        st.rerun()
+                        do_rerun()
                     else:
                         st.error("Failed to save holding. Please check inputs.")
 
@@ -1328,7 +1356,7 @@ elif page == "🔔 Watchlist":
                 rid = add_watchlist_item(watch_sym.strip().upper())
                 if rid:
                     st.success(f"Added {watch_sym.strip().upper()} to watchlist")
-                    st.experimental_rerun()
+                    do_rerun()
                 else:
                     st.error("Failed to add to watchlist")
 
@@ -1349,12 +1377,121 @@ elif page == "🔔 Watchlist":
             delta = None
             if cur is not None and prev is not None:
                 delta = cur - prev
-            st.markdown(f"**{comp}** `{s}` — Price: {format_price(cur, m.get('currency','INR')) if cur is not None else 'N/A'} {f'Δ {delta:+.2f}' if delta is not None else ''}")
-            if st.button("Remove", key=f"watch_rm_{it['id']}"):
-                remove_watchlist_item(it['id'])
-                st.experimental_rerun()
+            # Format percent change
+            pct_str = ""
+            if cur is not None and prev is not None and prev != 0:
+                pct = (cur - prev) / prev * 100
+                pct_str = f" ({pct:+.2f}%)"
+
+            st.markdown(f"**{comp}** `{s}` — Price: {format_price(cur, m.get('currency','INR')) if cur is not None else 'N/A'}{pct_str}")
+
+            col_a, col_b, col_c = st.columns([1,1,1])
+            with col_a:
+                if st.button("Open Stock", key=f"watch_open_{it['id']}"):
+                    # programmatically navigate to Stock Dashboard and prefill ticker
+                    st.session_state["watch_select_ticker"] = s
+                    st.session_state["navigate_to_stock"] = True
+                    do_rerun()
+            with col_b:
+                if st.button("Remove", key=f"watch_rm_{it['id']}"):
+                    remove_watchlist_item(it['id'])
+                    do_rerun()
+            with col_c:
+                st.write("")
 
     st.markdown("---")
+    # ------------------ Alerts UI ------------------
+    st.markdown("### 🔔 Alerts")
+    st.markdown("Create simple price or daily-move alerts for symbols in your watchlist or portfolio.")
+
+    all_symbols = list({it['symbol'] for it in get_watchlist()} | {h['symbol'] for h in get_all_holdings()})
+    if not all_symbols:
+        st.info("Add watchlist items or portfolio holdings to create alerts.")
+    else:
+        a_col1, a_col2, a_col3 = st.columns([2,1,1])
+        with a_col1:
+            alert_sym = st.selectbox("Symbol", options=sorted(all_symbols))
+        with a_col2:
+            alert_type = st.selectbox("Alert Type", options=["Price Above", "Price Below", "Daily % Up", "Daily % Down"]) 
+        with a_col3:
+            alert_threshold = st.number_input("Target", value=0.0, format="%g")
+
+        an_col1, an_col2 = st.columns([3,1])
+        with an_col1:
+            alert_name = st.text_input("Alert Name (optional)")
+        with an_col2:
+            if st.button("Create Alert"):
+                # Map alert type to stored condition
+                cond_map = {
+                    "Price Above": "gt",
+                    "Price Below": "lt",
+                    "Daily % Up": "pct_up",
+                    "Daily % Down": "pct_down",
+                }
+                cond = cond_map.get(alert_type)
+                if not alert_sym or alert_threshold is None:
+                    st.warning("Provide symbol and target value.")
+                else:
+                    rid = add_alert(alert_name or f"{alert_sym} {alert_type}", alert_sym, cond, float(alert_threshold), active=True)
+                    if rid:
+                        st.success("Alert created.")
+                        do_rerun()
+                    else:
+                        st.error("Failed to create alert.")
+
+    st.markdown("---")
+    # List existing alerts
+    st.markdown("### Active Alerts")
+    alerts = get_alerts()
+    if not alerts:
+        st.info("No alerts defined yet.")
+    else:
+        alert_syms = list({a['symbol'] for a in alerts})
+        prices_a = get_portfolio_market_data(alert_syms)
+
+        if st.button("Check Alerts"):
+            st.session_state["alerts_checked"] = True
+
+        checked = st.session_state.get("alerts_checked", False)
+
+        for a in alerts:
+            sym = a['symbol']
+            cur = prices_a.get(sym, {}).get('current_price')
+            prev = prices_a.get(sym, {}).get('prev_close')
+            typ = a['condition']
+            thr = a['threshold']
+            active = bool(a.get('active', 1))
+
+            status = "Active" if active else "Inactive"
+            triggered = False
+            reason = ""
+
+            if active and cur is not None:
+                if typ == 'gt' and cur > thr:
+                    triggered = True
+                    reason = f"Price {cur} > {thr}"
+                elif typ == 'lt' and cur < thr:
+                    triggered = True
+                    reason = f"Price {cur} < {thr}"
+                elif typ in ('pct_up', 'pct_down') and prev is not None and prev != 0:
+                    pct = (cur - prev) / prev * 100
+                    if typ == 'pct_up' and pct >= thr:
+                        triggered = True
+                        reason = f"Daily change {pct:+.2f}% >= {thr}%"
+                    if typ == 'pct_down' and pct <= -abs(thr):
+                        triggered = True
+                        reason = f"Daily change {pct:+.2f}% <= -{abs(thr)}%"
+
+            if triggered and checked:
+                status = "Triggered"
+
+            cur_str = format_price(cur, prices_a.get(sym, {}).get('currency', 'INR')) if cur is not None else 'N/A'
+            st.markdown(f"- **{a.get('name') or 'Alert'}** | `{sym}` | Type: `{typ}` | Target: `{thr}` | Current: {cur_str} | Status: **{status}** {f'— {reason}' if reason else ''}")
+            # Remove button
+            if st.button("Remove Alert", key=f"rm_alert_{a['id']}"):
+                remove_alert(a['id'])
+                do_rerun()
+
 
 elif page == "🛡️ Risk Intelligence":
     st.markdown("<h1 class='main-header'>🛡️ Risk Intelligence</h1>", unsafe_allow_html=True)
@@ -1402,6 +1539,257 @@ elif page == "🛡️ Risk Intelligence":
 
     st.markdown('---')
 
+elif page == "🧠 AI Research Assistant":
+    st.markdown("<h1 class='main-header'>🧠 AI Research Assistant</h1>", unsafe_allow_html=True)
+    st.markdown("<p class='sub-header'>Ask questions about your portfolio, stocks, news, and IPO analysis. The assistant uses Gemini but is provided deterministic facts from Python.</p>", unsafe_allow_html=True)
+
+    # Availability check
+    gemini_health = test_gemini_connection()
+    if not gemini_health.get('success'):
+        st.error("AI Research Assistant is currently unavailable.")
+    else:
+        if 'ai_chat_history' not in st.session_state:
+            st.session_state['ai_chat_history'] = []
+
+        # Render conversation
+        for msg in st.session_state['ai_chat_history']:
+            role = msg.get('role')
+            text = msg.get('text')
+            if role == 'user':
+                st.markdown(f"**You:** {text}")
+            else:
+                st.markdown(f"**AI:** {text}")
+
+        # Input
+        q = st.text_area("Ask the AI Research Assistant a question:", height=80, key='ai_q')
+        if st.button("Send", key='ai_send') and q.strip():
+            # Build deterministic context from Python
+            holdings = get_all_holdings()
+            syms = list({h['symbol'] for h in holdings}) if holdings else []
+            mkt = get_portfolio_market_data(syms) if syms else {}
+
+            # Portfolio summary
+            total_invested = 0.0
+            total_cur = 0.0
+            entries = []
+            for h in holdings:
+                sym = h['symbol']
+                qty = float(h['quantity'])
+                avg = float(h.get('avg_buy_price') or h.get('buy_price', 0))
+                invested = qty * avg
+                total_invested += invested
+                md = mkt.get(sym, {})
+                cur = md.get('current_price')
+                cur_val = (cur * qty) if cur is not None else None
+                if cur_val is not None:
+                    total_cur += cur_val
+                entries.append({
+                    'symbol': sym,
+                    'qty': qty,
+                    'avg': avg,
+                    'current_price': cur,
+                    'current_value': cur_val,
+                    'company': md.get('company_name') or sym,
+                    'sector': md.get('sector')
+                })
+
+            total_pnl = (total_cur - total_invested) if total_cur else None
+            total_pnl_pct = (total_pnl / total_invested * 100) if (total_pnl is not None and total_invested > 0) else None
+
+            # Recent market news for top symbols (best-effort, non-blocking)
+            news_samples = {}
+            for s in (syms[:5] if syms else []):
+                try:
+                    articles = get_stock_news(s)
+                    news_samples[s] = articles
+                except Exception:
+                    news_samples[s] = []
+
+            context = {
+                'portfolio_summary': {
+                    'total_invested': round(total_invested, 2),
+                    'total_current_value': round(total_cur, 2) if total_cur else None,
+                    'total_unrealised_pnl': round(total_pnl, 2) if total_pnl is not None else None,
+                    'total_unrealised_pnl_pct': round(total_pnl_pct, 2) if total_pnl_pct is not None else None,
+                    'holdings': entries
+                },
+                'recent_news': news_samples
+            }
+
+            # Save user message
+            st.session_state['ai_chat_history'].append({'role': 'user', 'text': q})
+
+            # Call Gemini with a strict prompt
+            client = get_genai_client()
+            prompt = f"""
+You are an assistant that MUST answer using ONLY the factual JSON provided below. Do NOT invent numbers or facts. If the information needed is not present, respond with "I don't have that information available." Keep answers concise, and do NOT provide investment advice.
+
+Context JSON:
+{json.dumps(context)}
+
+User question: {q}
+"""
+            try:
+                resp = client.models.generate_content(
+                    model=GEMINI_MODEL,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(temperature=0.0)
+                )
+                answer = resp.text.strip() if resp and resp.text else "I couldn't generate an answer."
+            except Exception as e:
+                answer = f"AI Research Assistant error: {str(e)}"
+
+            st.session_state['ai_chat_history'].append({'role': 'assistant', 'text': answer})
+            do_rerun()
+
+    st.markdown('---')
+
+elif page == "🏭 Sector Intelligence":
+    st.markdown("<h1 class='main-header'>🏭 Sector Intelligence</h1>", unsafe_allow_html=True)
+    st.markdown("<p class='sub-header'>Sector exposure & allocation for your portfolio.</p>", unsafe_allow_html=True)
+
+    holdings = get_all_holdings()
+    if not holdings:
+        st.info("Sector data unavailable — add holdings to your portfolio.")
+    else:
+        syms = list({h['symbol'] for h in holdings})
+        mkt = get_portfolio_market_data(syms)
+
+        sector_map = {}
+        priced_holdings = []
+        for h in holdings:
+            sym = h['symbol']
+            qty = float(h['quantity'])
+            md = mkt.get(sym, {})
+            cur = md.get('current_price')
+            cur_val = cur * qty if cur is not None else None
+            sec = md.get('sector')
+            priced_holdings.append({'symbol': sym, 'cur_value': cur_val, 'sector': sec, 'company': md.get('company_name')})
+            if sec and cur_val is not None:
+                sector_map.setdefault(sec, 0.0)
+                sector_map[sec] += cur_val
+
+        total_val = sum(v for v in sector_map.values())
+        if not sector_map or total_val == 0:
+            st.info("Sector data unavailable")
+        else:
+            sec_df = pd.DataFrame([{'sector': k, 'value': v, 'pct': round(v/total_val*100,2)} for k, v in sector_map.items()])
+            st.subheader("Portfolio Sector Allocation")
+            st.dataframe(sec_df.sort_values('value', ascending=False), hide_index=True)
+
+            # Plotly pie
+            fig = go.Figure(data=[go.Pie(labels=sec_df['sector'], values=sec_df['value'], hole=0.35)])
+            fig.update_layout(margin=dict(l=10,r=10,t=30,b=10), height=360)
+            st.plotly_chart(fig, use_container_width=True)
+
+            largest = sec_df.sort_values('value', ascending=False).iloc[0]
+            st.markdown(f"**Largest sector:** {largest['sector']} — {largest['pct']}%")
+
+            # Optional: show recent news for selected sector
+            sel = st.selectbox("Show news for sector:", options=['(none)'] + sorted(list(sector_map.keys())))
+            if sel and sel != '(none)':
+                try:
+                    arts = get_stock_news(f"{sel} sector India")
+                    for a in arts:
+                        st.markdown(f"- [{a['headline']}]({a['url']}) — {a['source']} ({a['publication_date']}) — {a['sentiment']}")
+                except Exception as e:
+                    st.info(f"Sector news unavailable: {str(e)}")
+
+    st.markdown('---')
+
+elif page == "📑 Research Reports":
+    st.markdown("<h1 class='main-header'>📑 Research Reports</h1>", unsafe_allow_html=True)
+    st.markdown("<p class='sub-header'>Generate structured reports from existing app data (stock, portfolio or saved IPO analyses).</p>", unsafe_allow_html=True)
+
+    report_type = st.selectbox("Report Type:", options=["Portfolio", "Stock", "Saved IPO Report"]) 
+
+    if report_type == "Portfolio":
+        holdings = get_all_holdings()
+        if not holdings:
+            st.info("No portfolio holdings to report on.")
+        else:
+            syms = list({h['symbol'] for h in holdings})
+            mkt = get_portfolio_market_data(syms)
+            # Build summary
+            total_invested = 0.0
+            total_cur = 0.0
+            rows = []
+            for h in holdings:
+                qty = float(h['quantity'])
+                avg = float(h.get('avg_buy_price') or h.get('buy_price', 0))
+                invested = qty * avg
+                total_invested += invested
+                md = mkt.get(h['symbol'], {})
+                cur = md.get('current_price')
+                cur_val = (cur * qty) if cur is not None else None
+                if cur_val is not None:
+                    total_cur += cur_val
+                rows.append({'symbol': h['symbol'], 'company': md.get('company_name') or h['symbol'], 'qty': qty, 'avg': avg, 'cur_price': cur, 'cur_value': cur_val})
+
+            total_pnl = (total_cur - total_invested) if total_cur else None
+            total_pnl_pct = (total_pnl / total_invested * 100) if (total_pnl is not None and total_invested>0) else None
+
+            # Render and offer download
+            report_lines = []
+            report_lines.append("# Portfolio Research Report\n")
+            report_lines.append("## Executive Summary\n")
+            report_lines.append(f"Total Invested: {total_invested:.2f}\n")
+            report_lines.append(f"Current Value: {total_cur:.2f if total_cur else 'N/A'}\n")
+            report_lines.append("\n## Holdings\n")
+            for r in rows:
+                report_lines.append(f"- {r['symbol']} | {r['company']} | Qty: {r['qty']} | Current: {r['cur_price'] or 'N/A'} | Value: {r['cur_value'] or 'N/A'}\n")
+
+            report_text = "\n".join(report_lines)
+            st.markdown(report_text)
+            st.download_button("Download Report (TXT)", data=report_text, file_name="portfolio_report.txt")
+
+    elif report_type == "Stock":
+        # Allow choosing symbol from holdings + watchlist
+        opts = []
+        opts += [h['symbol'] for h in get_all_holdings()]
+        opts += [w['symbol'] for w in get_watchlist()]
+        opts = sorted(list(dict.fromkeys(opts)))
+        if not opts:
+            st.info("No symbols available for stock report.")
+        else:
+            sel = st.selectbox("Select Stock:", options=opts)
+            if sel:
+                sd = get_stock_info(sel)
+                st.markdown(f"## {sd.get('company_name','')} ({sel})")
+                st.markdown("### Financial / Market Snapshot")
+                st.markdown(f"- Current Price: {sd.get('current_price') or 'N/A'}")
+                st.markdown(f"- Market Cap: {sd.get('market_cap') or 'N/A'}")
+                st.markdown(f"- PE Ratio: {sd.get('pe_ratio') or 'N/A'}")
+                try:
+                    arts = get_stock_news(sel)
+                    st.markdown("### Recent News")
+                    for a in arts:
+                        st.markdown(f"- [{a['headline']}]({a['url']}) — {a['source']} ({a['publication_date']}) — {a['sentiment']}")
+                except Exception:
+                    st.info("No news available for this symbol.")
+
+    else:  # Saved IPO Report
+        saved = get_all_reports()
+        if not saved:
+            st.info("No saved IPO reports available.")
+        else:
+            opts = [f"{r.get('company_name') or 'Unknown'} ({r.get('id')})" for r in saved]
+            sel = st.selectbox("Select Saved Report:", options=opts)
+            if sel:
+                idx = opts.index(sel)
+                rep = saved[idx]
+                st.markdown(f"## {rep.get('company_name')}")
+                parsed = rep.get('parsed_structured_data')
+                if parsed and isinstance(parsed, dict):
+                    st.markdown("### Executive Summary")
+                    st.write(parsed.get('business_summary') or 'N/A')
+                    st.markdown("### Recommendation")
+                    st.write(parsed.get('recommendation') or 'N/A')
+                    # Offer download
+                    out = json.dumps(parsed, indent=2)
+                    st.download_button("Download Structured Report (JSON)", data=out, file_name=f"{rep.get('company_name','report')}.json")
+
+
 elif page == "📈 Stock Dashboard":
     st.markdown("<h1 class='main-header'>📈 Financial Research AI</h1>", unsafe_allow_html=True)
     st.markdown("<p class='sub-header'>Equity dashboard with Plotly candlestick charting, moving averages, and news sentiment.</p>", unsafe_allow_html=True)
@@ -1409,9 +1797,13 @@ elif page == "📈 Stock Dashboard":
     # Search Box
     col_input, col_btn = st.columns([3, 1])
     with col_input:
+        # Allow programmatic prefill from Watchlist 'Open Stock' action
+        prefill = None
+        if "watch_select_ticker" in st.session_state:
+            prefill = st.session_state.pop("watch_select_ticker")
         ticker_input = st.text_input(
             "Enter Stock Ticker Symbol:",
-            value="RELIANCE.NS",
+            value=prefill or "RELIANCE.NS",
             placeholder="e.g. RELIANCE.NS, TCS.NS, AAPL, MSFT",
             help="For Indian stocks listed on NSE, append '.NS' (e.g. RELIANCE.NS). For BSE, append '.BO'."
         ).strip()

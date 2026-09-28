@@ -3,11 +3,12 @@ import os
 
 DB_PATH = "finance.db"
 
-def init_database():
+def init_database(db_path: str = None):
     """
     Initializes SQLite tables and applies non-destructive schema migrations.
     """
-    conn = sqlite3.connect(DB_PATH)
+    target_path = db_path if db_path else DB_PATH
+    conn = sqlite3.connect(target_path)
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -63,6 +64,8 @@ def init_database():
     columns = [col[1] for col in cursor.fetchall()]
 
     migrations = {
+        "summary": "ALTER TABLE drhp_reports ADD COLUMN summary TEXT;",
+        "red_flags": "ALTER TABLE drhp_reports ADD COLUMN red_flags TEXT;",
         "ipo_score": "ALTER TABLE drhp_reports ADD COLUMN ipo_score REAL;",
         "recommendation": "ALTER TABLE drhp_reports ADD COLUMN recommendation TEXT;",
         "industry": "ALTER TABLE drhp_reports ADD COLUMN industry TEXT;",
@@ -82,6 +85,7 @@ def init_database():
         symbol TEXT NOT NULL,
         company_name TEXT,
         quantity REAL NOT NULL,
+        buy_price REAL DEFAULT 0,
         avg_buy_price REAL NOT NULL DEFAULT 0,
         notes TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -119,6 +123,7 @@ def init_database():
 
     ph_migrations = {
         "company_name": "ALTER TABLE portfolio_holdings ADD COLUMN company_name TEXT;",
+        "buy_price": "ALTER TABLE portfolio_holdings ADD COLUMN buy_price REAL DEFAULT 0;",
         "avg_buy_price": "ALTER TABLE portfolio_holdings ADD COLUMN avg_buy_price REAL NOT NULL DEFAULT 0;",
         "notes": "ALTER TABLE portfolio_holdings ADD COLUMN notes TEXT;",
         "updated_at": "ALTER TABLE portfolio_holdings ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;",
@@ -128,6 +133,28 @@ def init_database():
         if col_name not in ph_cols:
             cursor.execute(alter_stmt)
             print(f"Added missing column '{col_name}' to portfolio_holdings table.")
+
+    # Non-destructive migrations for watchlist
+    cursor.execute("PRAGMA table_info(watchlist);")
+    wl_cols = [col[1] for col in cursor.fetchall()]
+    wl_migrations = {
+        "company_name": "ALTER TABLE watchlist ADD COLUMN company_name TEXT;",
+        "notes": "ALTER TABLE watchlist ADD COLUMN notes TEXT;",
+    }
+    for col_name, alter_stmt in wl_migrations.items():
+        if col_name not in wl_cols:
+            cursor.execute(alter_stmt)
+
+    # Non-destructive migrations for alerts
+    cursor.execute("PRAGMA table_info(alerts);")
+    alert_cols = [col[1] for col in cursor.fetchall()]
+    alert_migrations = {
+        "name": "ALTER TABLE alerts ADD COLUMN name TEXT;",
+        "active": "ALTER TABLE alerts ADD COLUMN active INTEGER DEFAULT 1;",
+    }
+    for col_name, alter_stmt in alert_migrations.items():
+        if col_name not in alert_cols:
+            cursor.execute(alter_stmt)
 
     conn.commit()
     conn.close()

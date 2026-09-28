@@ -18,14 +18,24 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
 def get_api_key() -> Optional[str]:
     """
-    Retrieves Gemini API key ONLY from environment variables (.env).
+    Retrieves Gemini API key from environment variables (.env) or Streamlit secrets.
     Never hardcodes or prints keys.
     """
     load_dotenv(override=True)
     key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if key and key.strip():
-        return key.strip()
+    if not key:
+        try:
+            import streamlit as st
+            if "GEMINI_API_KEY" in st.secrets:
+                key = st.secrets["GEMINI_API_KEY"]
+            elif "GOOGLE_API_KEY" in st.secrets:
+                key = st.secrets["GOOGLE_API_KEY"]
+        except Exception:
+            pass
+    if key and str(key).strip():
+        return str(key).strip()
     return None
+
 
 def get_genai_client() -> Optional[genai.Client]:
     """

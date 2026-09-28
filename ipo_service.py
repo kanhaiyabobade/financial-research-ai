@@ -1,9 +1,7 @@
 import sqlite3
 import json
 from typing import Dict, Any, List, Optional
-from database import init_database
-
-DB_PATH = "finance.db"
+from database import init_database, DB_PATH
 
 # Ensure database is initialized on import
 init_database()

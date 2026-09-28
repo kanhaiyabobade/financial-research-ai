@@ -28,8 +28,16 @@ def get_stock_news(company_name: str) -> List[Dict[str, str]]:
     """
     load_dotenv(override=True)
     api_key = os.getenv("NEWS_API_KEY")
-    if not api_key or not api_key.strip():
-        raise MissingAPIKeyError("NEWS_API_KEY is not configured in environment (.env).")
+    if not api_key:
+        try:
+            import streamlit as st
+            if "NEWS_API_KEY" in st.secrets:
+                api_key = st.secrets["NEWS_API_KEY"]
+        except Exception:
+            pass
+    if not api_key or not str(api_key).strip():
+        raise MissingAPIKeyError("NEWS_API_KEY is not configured in environment (.env or secrets).")
+
 
     url = "https://newsapi.org/v2/everything"
     params = {
