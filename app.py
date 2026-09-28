@@ -1,12 +1,14 @@
 import os
 import re
 import json
+from typing import Dict, Any, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from dotenv import load_dotenv
 import time
+
 
 # Load environment variables FIRST before importing any services
 load_dotenv(override=True)
@@ -180,10 +182,11 @@ def format_beta(val: Optional[float]) -> str:
 st.sidebar.markdown("<h2 style='font-family: \"Inter\", sans-serif; font-weight: 700;'>Navigation</h2>", unsafe_allow_html=True)
 # Helper to trigger a rerun across Streamlit versions
 def do_rerun():
-    try:
+    if hasattr(st, "rerun"):
+        st.rerun()
+    elif hasattr(st, "experimental_rerun"):
         st.experimental_rerun()
-    except Exception:
-        # Fallback: update query params to force a rerun
+    else:
         try:
             st.experimental_set_query_params(_refresh=int(time.time()))
         except Exception:
@@ -203,14 +206,16 @@ nav_options = [
 ]
 
 # If some code requested navigation to Stock Dashboard, honor it before creating widget
-initial_index = 2
+initial_index = 0
 if st.session_state.get("navigate_to_stock"):
     try:
         initial_index = nav_options.index("📈 Stock Dashboard")
+        st.session_state["main_nav"] = "📈 Stock Dashboard"
     except Exception:
-        initial_index = 2
+        initial_index = 1
     # clear flag so subsequent loads behave normally
     st.session_state.pop("navigate_to_stock", None)
+
 
 page = st.sidebar.radio(
     "Select Module:",
@@ -1309,7 +1314,7 @@ elif page == "💼 Portfolio Intelligence":
 # ==============================================================================
 # Additional Modules: Market Overview, Watchlist, Risk Intelligence, Stock Dashboard
 # ==============================================================================
-elif page == "🏠 Market Overview":
+elif page == "🏠 Market Overview" or page == "📰 Market Intelligence":
     st.markdown("<h1 class='main-header'>🏠 Market Overview</h1>", unsafe_allow_html=True)
     st.markdown("<p class='sub-header'>Major index snapshots and recent market news.</p>", unsafe_allow_html=True)
 
