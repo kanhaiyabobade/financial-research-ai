@@ -1734,7 +1734,12 @@ elif page == "📑 Research Reports":
             report_lines.append("# Portfolio Research Report\n")
             report_lines.append("## Executive Summary\n")
             report_lines.append(f"Total Invested: {total_invested:.2f}\n")
-            report_lines.append(f"Current Value: {total_cur:.2f if total_cur else 'N/A'}\n")
+            if total_cur is not None:
+                current_value_text = f"{total_cur:.2f}"
+            else:
+                current_value_text = "N/A"
+            report_lines.append(f"Current Value: {current_value_text}\n")
+
             report_lines.append("\n## Holdings\n")
             for r in rows:
                 report_lines.append(f"- {r['symbol']} | {r['company']} | Qty: {r['qty']} | Current: {r['cur_price'] or 'N/A'} | Value: {r['cur_value'] or 'N/A'}\n")
